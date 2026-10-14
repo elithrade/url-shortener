@@ -106,4 +106,4 @@ Set `CODE_LENGTH` back to `7` afterwards.
 7. A real concurrency test in xUnit.
 
 ## Related
-`CollisionLab` (a separate console project) holds the experiments that motivated these decisions: birthday-paradox collision counts by code length, and the `Dictionary` race with and without a lock.
+[collision-lab](https://github.com/elithrade/collision-lab) (a separate console project) holds the experiments that motivated these decisions: birthday-paradox collision counts by code length, and the `Dictionary` race with and without a lock.
