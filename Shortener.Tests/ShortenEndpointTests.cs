@@ -2,15 +2,18 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Shortener.Tests;
 
 public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly HttpClient _client;
+    private readonly WebApplicationFactory<Program> _factory;
 
     public ShortenEndpointTests(WebApplicationFactory<Program> factory)
     {
+        _factory = factory;
         _client = factory.CreateClient(
             new WebApplicationFactoryClientOptions
             {
@@ -108,5 +111,28 @@ public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>
 
         Assert.Equal(HttpStatusCode.Found, getResponse.StatusCode);
         Assert.Equal(expected, getResponse.Headers.Location?.OriginalString);
+    }
+
+    [Fact]
+    public async Task Returns_503_after_max_attempts_when_every_code_collide()
+    {
+        var store = new AlwaysCollidingStore();
+        var factory = _factory.WithWebHostBuilder(b =>
+            b.ConfigureServices(s =>
+            {
+                s.AddSingleton<IUrlStore>(store);
+            })
+        );
+        var client = factory.CreateClient(
+            new WebApplicationFactoryClientOptions { AllowAutoRedirect = false }
+        );
+
+        var response = await client.PostAsJsonAsync(
+            "/shorten",
+            new { url = "https://example.com/path" }
+        );
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(5, store.Attempts);
     }
 }
