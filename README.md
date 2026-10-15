@@ -11,15 +11,22 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It'
 
 ## Run
 ```bash
-dotnet run
+dotnet run --project src/Shortener
 ```
-The HTTP profile listens on `http://localhost:5154` (see `Properties/launchSettings.json`).
+The HTTP profile listens on `http://localhost:5154` (see `src/Shortener/Properties/launchSettings.json`).
 
 ## Tests
 ```bash
-dotnet test Shortener.Tests
+dotnet test
 ```
-`UrlValidatorTests` covers rejected input (empty, malformed, bad schemes, credentials, own host, length limit), the canonical form of accepted URLs, and the `TryValidate` contract (exactly one of `url` or `error` is set).
+`UrlValidatorTests` covers rejected input (empty, malformed, bad schemes, credentials, own host, length limit), the canonical form of accepted URLs, and the `TryValidate` contract (exactly one of `url` or `error` is set). `ShortenEndpointTests` runs the real pipeline in memory with `WebApplicationFactory`: the round trip, error responses, canonical `Location` headers, and the `503` path using a fake store that always collides.
+
+## Project layout
+```
+Shortener.slnx
+src/Shortener/            the web app
+tests/Shortener.Tests/    unit and endpoint tests
+```
 
 ## API
 
@@ -88,7 +95,7 @@ curl -i -X POST $BASE/shorten \
 ```
 
 ### Collision test
-Set `CODE_LENGTH = 1` in `Program.cs` (62 possible codes) and restart, because the store is in memory and must start empty. Then run:
+Set `CODE_LENGTH = 1` in `src/Shortener/Program.cs` (62 possible codes) and restart, because the store is in memory and must start empty. Then run:
 
 ```bash
 # Sequential: prints one status per request, so you can see when 503s start

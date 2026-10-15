@@ -6,11 +6,4 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
-  <ItemGroup>
-    <Compile Remove="Shortener.Tests/**" />
-    <Content Remove="Shortener.Tests/**" />
-    <EmbeddedResource Remove="Shortener.Tests/**" />
-    <None Remove="Shortener.Tests/**" />
-  </ItemGroup>
-
 </Project>
