@@ -116,23 +116,77 @@ public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>
     [Fact]
     public async Task Returns_503_after_max_attempts_when_every_code_collide()
     {
-        var store = new AlwaysCollidingStore();
+        var alwaysFailStore = CollidingStore.Always();
+        var collidingClient = NewCollidingClient(alwaysFailStore);
+
+        var response = await collidingClient.PostAsJsonAsync(
+            "/shorten",
+            new { url = "https://example.com/path" }
+        );
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(5, alwaysFailStore.Attempts);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Succeeds_when_collision_under_limit(int collisions)
+    {
+        var store = new CollidingStore(collisions);
+        var collidingClient = NewCollidingClient(store);
+
+        var response = await collidingClient.PostAsJsonAsync(
+            "/shorten",
+            new { url = "https://example.com/path" }
+        );
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+
+        var actual = await response.Content.ReadFromJsonAsync<ShortenResponse>();
+        var code = actual?.Code;
+
+        Assert.NotNull(code);
+
+        var getResponse = await collidingClient.GetAsync($"/{code}");
+
+        Assert.Equal(HttpStatusCode.Found, getResponse.StatusCode);
+        Assert.Equal("https://example.com/path", getResponse.Headers.Location?.OriginalString);
+        Assert.Equal(collisions + 1, store.Attempts);
+    }
+
+    [Theory]
+    [InlineData(4, HttpStatusCode.Created)] // the 5th (last allowed) attempt succeeds
+    [InlineData(5, HttpStatusCode.ServiceUnavailable)] // all 5 attempts collide
+    public async Task Returns_expected_status_at_the_retry_limit(
+        int collisions,
+        HttpStatusCode expected
+    )
+    {
+        var store = new CollidingStore(collisions);
+        var collidingClient = NewCollidingClient(store);
+
+        var response = await collidingClient.PostAsJsonAsync(
+            "/shorten",
+            new { url = "https://example.com/path" }
+        );
+
+        Assert.Equal(expected, response.StatusCode);
+        Assert.Equal(Math.Min(collisions + 1, 5), store.Attempts);
+    }
+
+    private HttpClient NewCollidingClient(CollidingStore store)
+    {
         var factory = _factory.WithWebHostBuilder(b =>
             b.ConfigureServices(s =>
             {
                 s.AddSingleton<IUrlStore>(store);
             })
         );
-        var client = factory.CreateClient(
+
+        return factory.CreateClient(
             new WebApplicationFactoryClientOptions { AllowAutoRedirect = false }
         );
-
-        var response = await client.PostAsJsonAsync(
-            "/shorten",
-            new { url = "https://example.com/path" }
-        );
-
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-        Assert.Equal(5, store.Attempts);
     }
 }

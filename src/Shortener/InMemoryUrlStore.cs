@@ -15,9 +15,9 @@ public sealed class InMemoryUrlStore : IUrlStore
             {
                 return ValueTask.FromResult<string?>(url);
             }
-
-            return ValueTask.FromResult<string?>(null);
         }
+
+        return ValueTask.FromResult<string?>(null);
     }
 
     public ValueTask<bool> TryAddAsync(string code, string url, CancellationToken ct)
