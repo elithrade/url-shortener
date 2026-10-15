@@ -9,6 +9,8 @@ Legend: `[x]` done, `[ ]` to do.
 - [x] `IUrlStore` with a lock-based `InMemoryUrlStore`, bounded retry on collisions
 - [x] `UrlValidator`: absolute http/https only, length cap, no credentials, no self-links, canonical form
 - [x] Unit tests for the validator and endpoint tests with `WebApplicationFactory`
+- [x] Retry-path tests with a `CollidingStore` fake: 503 when every code collides, success after 1 to 3 collisions, and the limit boundary (4 collisions succeed, 5 give 503). Mutation-checked against off-by-one loop bugs
+- [x] Restructured into `src/` and `tests/` with `Shortener.slnx`, and added `AGENTS.md` and `CLAUDE.md` for agent instructions
 - [x] Repos on GitHub: [url-shortener](https://github.com/elithrade/url-shortener), [collision-lab](https://github.com/elithrade/collision-lab)
 
 ## Line 1: usable and deployed (v1)
@@ -17,7 +19,7 @@ Legend: `[x]` done, `[ ]` to do.
 
 | # | Milestone | Done when |
 |---|---|---|
-| 1 | Finish the test suite | 503 test, retry-then-success test and parallel POST test pass |
+| 1 | Finish the test suite | Retry-path tests are done. The parallel POST test is left: 200 concurrent requests give 200 distinct codes, and each code resolves to its own URL |
 | 2 | CI | GitHub Actions runs build and test on every push and PR, and a failing test blocks the merge |
 | 3 | Better codes | `RandomNumberGenerator` replaces `Random`, with no modulo bias, and a distribution test passes |
 | 4 | Expiry | A link can have a TTL, and expired links return 410 or 404. Lazy check on read plus a background sweep, using `TimeProvider`, tested without `Sleep` |
@@ -69,4 +71,6 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Start each day by re-reading yesterday's diff, and end it with a committed state plus a note on what comes next.
 
 ## Next up
-Milestone 1: the 503 test using `CollidingStore`, then retry-then-success, then the parallel POST test.
+Milestone 1, last item: the parallel POST test. Concept first (what concurrent requests can and cannot prove), then write it with `Task.WhenAll`, then break the `lock` in `InMemoryUrlStore` on purpose to see whether the test fails.
+
+After that, milestone 2: a GitHub Actions workflow that runs `dotnet test` on every push and PR.
