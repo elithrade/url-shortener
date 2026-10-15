@@ -17,17 +17,23 @@ app.MapPost(
         CancellationToken ct
     ) =>
     {
-        var url = urlRequest.Url;
-        if (string.IsNullOrWhiteSpace(url))
+        if (
+            !UrlValidator.TryValidate(
+                urlRequest.Url,
+                ctx.Request.Host.Host,
+                out Uri? validatedUrl,
+                out string? error
+            )
+        )
         {
-            return Results.BadRequest("url is required");
+            return Results.BadRequest(error);
         }
 
         for (var i = 0; i < MAX_RETRY; i++)
         {
             var code = CodeGenerator.GenerateCode(CODE_LENGTH);
 
-            var added = await store.TryAddAsync(code, urlRequest.Url, ct);
+            var added = await store.TryAddAsync(code, validatedUrl.AbsoluteUri, ct);
             if (added)
             {
                 var request = ctx.Request;
