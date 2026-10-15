@@ -3,7 +3,7 @@
 Instructions for AI coding agents working in this repository.
 
 ## Project
-A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It is a **learning project** for system design, and the owner wants to write the core logic personally. See `README.md` for the API and `PLAN.md` for the roadmap and current milestone.
+A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It is a **learning project** for system design, and the owner wants to write the core logic personally. See `README.md` for the API, `PLAN.md` for the roadmap and current milestone, and `LESSONS.md` for the owner's self-test flashcards. When a session produces a new lesson (a bug found, a trap hit), offer to add a Q&A card to `LESSONS.md` in the same format.
 
 ## Layout
 ```
