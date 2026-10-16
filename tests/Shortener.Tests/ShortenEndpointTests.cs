@@ -176,6 +176,50 @@ public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>
         Assert.Equal(Math.Min(collisions + 1, 5), store.Attempts);
     }
 
+    [Fact]
+    public async Task Concurrent_posts_get_distinct_codes_that_resolve_to_their_own_urls()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var baseUrl = "https://example.com/";
+
+        // simulate starting all 200 tasks at once trying to add to the store
+        var tasks = Enumerable
+            .Range(0, 200)
+            .Select(i =>
+                Task.Run(async () =>
+                {
+                    await gate.Task;
+
+                    var key = $"k{i}";
+                    var response = await _client.PostAsJsonAsync(
+                        "/shorten",
+                        new { url = baseUrl + key }
+                    );
+                    var status = response.StatusCode;
+                    var code = (await response.Content.ReadFromJsonAsync<ShortenResponse>())?.Code;
+
+                    return (i, status, code);
+                })
+            )
+            .ToArray();
+
+        // release and run all
+        gate.SetResult();
+        var results = await Task.WhenAll(tasks);
+
+        Assert.All(results, r => Assert.Equal(HttpStatusCode.Created, r.status));
+        Assert.Equal(200, results.Select(r => r.code).Distinct().Count());
+
+        foreach (var (i, _, code) in results)
+        {
+            var response = await _client.GetAsync($"/{code}");
+            var key = $"k{i}";
+
+            Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+            Assert.Equal(baseUrl + key, response.Headers.Location?.OriginalString);
+        }
+    }
+
     private HttpClient NewCollidingClient(CollidingStore store)
     {
         var factory = _factory.WithWebHostBuilder(b =>

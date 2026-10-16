@@ -1,5 +1,3 @@
-using System.Collections.Concurrent;
-
 namespace Shortener.Tests;
 
 public class InMemoryStoreTests
@@ -11,7 +9,7 @@ public class InMemoryStoreTests
         var store = new InMemoryUrlStore();
         var baseUrl = "https://example.com/";
 
-        // simulate starting all 1000 threads at once trying to add to the store
+        // simulate starting all 1000 tasks at once trying to add to the store
         var tasks = Enumerable
             .Range(0, 1000)
             .Select(i =>
@@ -41,7 +39,7 @@ public class InMemoryStoreTests
         var store = new InMemoryUrlStore();
         var baseUrl = "https://example.com/";
 
-        // simulate starting all 1000 threads at once trying to add to the store
+        // simulate starting all 1000 tasks at once trying to add to the store
         var tasks = Enumerable
             .Range(0, 1000)
             .Select(i =>
