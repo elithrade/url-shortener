@@ -12,6 +12,7 @@ Legend: `[x]` done, `[ ]` to do.
 - [x] Retry-path tests with a `CollidingStore` fake: 503 when every code collides, success after 1 to 3 collisions, and the limit boundary (4 collisions succeed, 5 give 503). Mutation-checked against off-by-one loop bugs
 - [x] Store concurrency tests against the real `InMemoryUrlStore`, released together from a `TaskCompletionSource` gate: same key gives exactly one winner, and 1,000 tasks x 10 distinct keys are all stored and readable. Mutation-checked: with the lock removed, the distinct-keys test failed 30 of 30 runs, and the same-key test only 1 of 30
 - [x] Endpoint concurrency test through `WebApplicationFactory`: 200 concurrent `POST /shorten` each return 201, and every returned code redirects to its own URL. Mutation-checked: with the lock removed it failed 28 of 30 runs, and a scoped store registration makes it fail with 404s
+- [x] CI with GitHub Actions (`.github/workflows/ci.yml`): checkout, `setup-dotnet` 10.0.x, Release build, `dotnet test --no-build`. A deliberately broken test on a PR turned the `build` check red at the test step. Ruleset `protect-main` requires a PR and the `build` check, and blocks force-push and deletion, with the repository admin role allowed to bypass (so direct pushes to `main` still work for the owner, and the gate is advisory for them)
 - [x] Restructured into `src/` and `tests/` with `Shortener.slnx`, and added `AGENTS.md` and `CLAUDE.md` for agent instructions
 - [x] Repos on GitHub: [url-shortener](https://github.com/elithrade/url-shortener), [collision-lab](https://github.com/elithrade/collision-lab)
 
@@ -22,7 +23,7 @@ Legend: `[x]` done, `[ ]` to do.
 | # | Milestone | Done when |
 |---|---|---|
 | 1 | ✅ Finish the test suite | Done: retry-path tests, store concurrency tests and the endpoint concurrency test (200 concurrent POSTs, each code resolving to its own URL) all pass, and each was mutation-checked |
-| 2 | CI | GitHub Actions runs build and test on every push and PR, and a failing test blocks the merge |
+| 2 | ✅ CI | Done: GitHub Actions builds and tests on every push and PR, a red run was demonstrated, and the `build` check is required by a ruleset on `main` (admin bypass left on, so it is advisory for the owner). Optional leftovers: a README badge, a test-report step, pinning the runner image or SDK |
 | 3 | Better codes | `RandomNumberGenerator` replaces `Random`, with no modulo bias, and a distribution test passes |
 | 4 | Expiry | A link can have a TTL, and expired links return 410 or 404. Lazy check on read plus a background sweep, using `TimeProvider`, tested without `Sleep` |
 | 5 | Persistence | A SQLite (or Postgres) `IUrlStore` replaces the in-memory one. Links survive a restart. The same contract tests run against both implementations |
@@ -73,6 +74,6 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Start each day by re-reading yesterday's diff, and end it with a committed state plus a note on what comes next.
 
 ## Next up
-Milestone 2: a GitHub Actions workflow that runs `dotnet test` on every push and PR, with a failing test blocking the merge. The repo is ready for it: `Shortener.slnx` at the root means a single `dotnet test` step finds both projects, and the tests need no external services.
+Milestone 3: better codes. Replace `Random` in `CodeGenerator` with `RandomNumberGenerator`, with no modulo bias. Concept first (rejection sampling and why `% 62` on a byte is biased, which you saw in the lessons), then you write the generator and a distribution test that counts character frequencies, and mutation-check it by putting the bias back to see the test fail.
 
-Then milestone 3 (`RandomNumberGenerator` and an unbiased code generator) and milestone 4 (expiry with `TimeProvider`).
+Then milestone 4 (expiry with `TimeProvider`).
