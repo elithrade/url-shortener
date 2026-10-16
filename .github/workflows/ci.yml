@@ -1,0 +1,28 @@
+name: Url shortener web app CI
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Use dotnet 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Run dotnet build
+        run: dotnet build --configuration Release
+
+      - name: Run dotnet test
+        run: dotnet test --no-build --configuration Release
