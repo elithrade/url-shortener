@@ -224,6 +224,46 @@ Break the code on purpose (`<=` for `<`, remove a `return`, swap `AbsoluteUri` f
 With a limit of 5: 4 collisions then success returns 201 (the last allowed attempt can succeed), and 5 collisions returns 503 (the loop stops).
 </details>
 
+<details><summary>Real store or fake for a concurrency test, and at which level (store or endpoint)?</summary>
+
+Use the **real** store: the aim is to prove its lock and atomicity, and a fake only tests the fake. Fakes are for forcing branches that are hard to produce (collisions). Test the invariant at the **store level**, where you control the contention: many callers on the *same* key must give exactly one `true`, and many distinct keys must all be stored. An endpoint test with 7-character random codes never hits the same code twice, so it can't show the race. It's still useful as a wiring smoke test (singleton lifetime, handler plus store).
+</details>
+
+<details><summary>Why are races hard to catch in tests, and what do you do about it?</summary>
+
+An unlocked bug only shows when threads actually overlap, and a fast operation can finish before the next task even starts. Force overlap with a starting gate, use many callers, loop inside each task for more interleavings, run it repeatedly, and always do the mutation check: remove the lock and see which tests fail (expect the sharp store test to fail consistently, and the endpoint test to be flaky or green).
+</details>
+
+<details><summary>You collect results from 1,000 concurrent tasks in a <code>List&lt;bool&gt;</code>. Does pre-sizing it (<code>new List&lt;bool&gt;(1000)</code>) make it safe?</summary>
+
+No. `List<T>.Add` reads `_size`, may resize, writes the slot, then increments `_size`. Two threads can read the same `_size` and write the same slot, so items are lost, and a resize can throw. Measured over 300 trials of 1,000 concurrent adds: the default list threw in 8 and had `Count != 1000` in 298. The pre-sized list never threw, but **all 300 lost items**. Pre-sizing hides the exception and keeps the bug. The measuring tool had the same bug as the thing under test.
+</details>
+
+<details><summary>What is the best way to collect results from concurrent tasks in a test?</summary>
+
+Don't share a collection. Let each task return its result and use `bool[] results = await Task.WhenAll(tasks)`, which keeps results in order with no shared state. If you must share, use a concurrent collection (`ConcurrentBag`, `ConcurrentQueue`). A collection local to one task needs no thread safety, because its awaits run one after another.
+</details>
+
+<details><summary>You removed the <code>lock</code> from the store. The "same key, 1,000 callers" test passes 29 of 30 runs. Why, and what test do you add?</summary>
+
+The same-key race needs two threads to pass "is the key missing?" within the same few nanoseconds, so it's real but rare. Keep the test, because it states the uniqueness rule, but it can't be the only guard. Add a distinct-keys test (1,000 tasks, each looping 10 times over its own keys, then read every key back): every add is a write to shared structure (buckets, entries, resize), so corruption appears almost every run. Without the lock it failed 30 of 30.
+</details>
+
+<details><summary>Why assert both "every add returned true" and "every key reads back"?</summary>
+
+A corrupted `Dictionary` can report success and still lose the entry. The first check catches wrongly rejected keys, and the read-back catches entries that were silently lost. Run the read-back sequentially after `WhenAll`, so no concurrency is needed, and a failure names the missing key.
+</details>
+
+<details><summary>What does <code>InvalidOperationException: Operations that change non-concurrent collections must have exclusive access</code> mean?</summary>
+
+`Dictionary` detected that its own internal structure was corrupted by concurrent writes (inconsistent bucket chains) and threw instead of looping forever. The detection is best-effort. Other runs lose entries silently, so don't treat the exception as protection.
+</details>
+
+<details><summary>What makes a concurrency test trustworthy?</summary>
+
+It must fail when the protection is removed. Remove the lock in a scratch copy and run the test many times (30), and measure the failure rate. A test that fails 1 time in 30 is a weak detector, and one that fails 30 of 30 is a sharp one. Use a sharp test for detection and a precise test to document the invariant.
+</details>
+
 ## 7. Tooling and workflow
 
 <details><summary>Do you need <code>git mv</code> to keep history?</summary>
@@ -235,3 +275,41 @@ No. Git detects renames by content similarity (about 50% or more). `git mv` equa
 
 A nested test project needed four `<Compile Remove>` lines, and the editor loaded only one project (no "add using" suggestions). A root solution file lists both projects, so `dotnet test`, the language server and CI all find everything.
 </details>
+
+## 8. Async and the thread pool
+
+<details><summary>Why use a starting gate in a concurrency test?</summary>
+
+`Task.Run` starts work as soon as a thread is free. A fast operation can finish before later tasks start, so there's almost no overlap and a missing lock goes unnoticed. A gate parks every worker, then releases them together.
+</details>
+
+<details><summary>You start 1,000 tasks that each call <code>barrier.SignalAndWait()</code> on a 16-core, 32-thread machine. What happens?</summary>
+
+It practically hangs. The pool's minimum thread count equals the logical processors (32), and beyond that it injects only about one or two threads per second. Thirty-two tasks block waiting for 968 others that are queued behind them, because the blocked threads count as busy. Rule: never block pool threads waiting for something that needs other pool threads to run. `Barrier` needs all N to arrive, so keep N at or below the number of threads that can run.
+</details>
+
+<details><summary>Same 1,000 tasks, but with a <code>ManualResetEventSlim</code> gate. Does it hang? How much overlap do you get?</summary>
+
+No hang: the gate depends on the test thread calling `Set()`, not on the other tasks, so there is no circular wait. But only about 32 tasks (the pool minimum) wait at the gate while the rest queue, so peak overlap is about 32 threads. It's still real contention.
+</details>
+
+<details><summary>What does <code>await</code> do to the thread when the awaited task isn't complete?</summary>
+
+The compiler-generated state machine registers "run the rest of me when this completes" on the task, and the method returns. The thread goes back to the pool. The parked task is a small object that uses no thread. That's why 1,000 tasks can wait at an async gate (<code>await gate.Task</code>) without starving the pool.
+</details>
+
+<details><summary>Why create the gate as <code>new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)</code>?</summary>
+
+Without the flag, `SetResult()` runs the waiting continuations inline, one after another, on the calling thread, which serializes the very work you wanted to overlap. With it, each continuation is queued to the pool separately.
+</details>
+
+<details><summary>Does the async gate let 1,000 tasks run truly simultaneously?</summary>
+
+No. Execution is still limited by the pool's threads and the cores (about 32 at a time, 16 really parallel). What it removes is the need for 1,000 threads to *wait*: all 1,000 reach the starting line and become runnable together, without starvation or tuning. For more pressure, loop inside each task rather than adding tasks.
+</details>
+
+<details><summary>When is each gate appropriate: <code>TaskCompletionSource</code>, <code>ManualResetEventSlim</code>, <code>Barrier</code>?</summary>
+
+`TaskCompletionSource` for many tasks and async test methods (the default choice). `ManualResetEventSlim` or `Barrier` for a handful of dedicated threads, or synchronous code. Keep the number of blocked workers at or below the core count.
+</details>
+
