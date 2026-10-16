@@ -9,7 +9,7 @@ public sealed class InMemoryUrlStore : IUrlStore
     {
         ct.ThrowIfCancellationRequested();
 
-        lock (_lock)
+        // lock (_lock)
         {
             if (_store.TryGetValue(code, out string? url))
             {
@@ -25,7 +25,7 @@ public sealed class InMemoryUrlStore : IUrlStore
         ct.ThrowIfCancellationRequested();
 
         bool added;
-        lock (_lock)
+        // lock (_lock)
         {
             added = _store.TryAdd(code, url);
         }
