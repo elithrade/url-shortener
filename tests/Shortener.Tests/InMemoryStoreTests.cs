@@ -16,7 +16,8 @@ public class InMemoryStoreTests
                 Task.Run(async () =>
                 {
                     await gate.Task;
-                    return await store.TryAddAsync("same", baseUrl + i, CancellationToken.None);
+                    var linkEntry = new LinkEntry(baseUrl + i, null);
+                    return await store.TryAddAsync("same", linkEntry, CancellationToken.None);
                 })
             )
             .ToArray();
@@ -52,11 +53,9 @@ public class InMemoryStoreTests
                     for (int j = 0; j < 10; j++)
                     {
                         var key = $"k{i}-{j}";
-                        allAdded &= await store.TryAddAsync(
-                            key,
-                            baseUrl + key,
-                            CancellationToken.None
-                        );
+                        var linkEntry = new LinkEntry(baseUrl + key, null);
+
+                        allAdded &= await store.TryAddAsync(key, linkEntry, CancellationToken.None);
                     }
 
                     return allAdded;

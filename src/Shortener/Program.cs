@@ -33,7 +33,9 @@ app.MapPost(
         {
             var code = CodeGenerator.GenerateCode(CODE_LENGTH);
 
-            var added = await store.TryAddAsync(code, validatedUrl.AbsoluteUri, ct);
+            var linkEntry = new LinkEntry(validatedUrl.AbsoluteUri, null);
+
+            var added = await store.TryAddAsync(code, linkEntry, ct);
             if (added)
             {
                 var request = ctx.Request;

@@ -4,23 +4,23 @@ internal sealed class CollidingStore(int failedAttempts) : IUrlStore
 {
     public int Attempts;
 
-    private readonly Dictionary<string, string> _items = [];
+    private readonly Dictionary<string, LinkEntry> _items = [];
     private readonly Lock _lock = new();
 
     public ValueTask<string?> GetAsync(string code, CancellationToken ct)
     {
         lock (_lock)
         {
-            if (_items.TryGetValue(code, out string? url))
+            if (_items.TryGetValue(code, out LinkEntry? linkEntry))
             {
-                return ValueTask.FromResult<string?>(url);
+                return ValueTask.FromResult<string?>(linkEntry.Url);
             }
         }
 
         return ValueTask.FromResult<string?>(null);
     }
 
-    public ValueTask<bool> TryAddAsync(string code, string url, CancellationToken ct)
+    public ValueTask<bool> TryAddAsync(string code, LinkEntry linkEntry, CancellationToken ct)
     {
         var attempts = Interlocked.Increment(ref Attempts);
 
@@ -32,7 +32,7 @@ internal sealed class CollidingStore(int failedAttempts) : IUrlStore
         bool added;
         lock (_lock)
         {
-            added = _items.TryAdd(code, url);
+            added = _items.TryAdd(code, linkEntry);
         }
 
         return ValueTask.FromResult(added);
