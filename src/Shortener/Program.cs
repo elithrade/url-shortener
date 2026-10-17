@@ -2,16 +2,18 @@ using Shortener;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<IUrlStore, InMemoryUrlStore>();
+builder.Services.AddSingleton(TimeProvider.System);
 
 var app = builder.Build();
 
-const int MAX_RETRY = 5;
-const int CODE_LENGTH = 7;
+const int MaxAttempts = 5;
+const int CodeLength = 7;
 
 app.MapPost(
     "/shorten",
     async (
         ShortenedUrlRequest urlRequest,
+        TimeProvider clock,
         IUrlStore store,
         HttpContext ctx,
         CancellationToken ct
@@ -29,11 +31,23 @@ app.MapPost(
             return Results.BadRequest(error);
         }
 
-        for (var i = 0; i < MAX_RETRY; i++)
+        if (
+            !ExpiryPolicy.TryResolve(
+                urlRequest.ExpiresInSeconds,
+                clock.GetUtcNow(),
+                out DateTimeOffset? expiryAt,
+                out error
+            )
+        )
         {
-            var code = CodeGenerator.GenerateCode(CODE_LENGTH);
+            return Results.BadRequest(error);
+        }
 
-            var linkEntry = new LinkEntry(validatedUrl.AbsoluteUri, null);
+        for (var i = 0; i < MaxAttempts; i++)
+        {
+            var code = CodeGenerator.GenerateCode(CodeLength);
+
+            var linkEntry = new LinkEntry(validatedUrl.AbsoluteUri, expiryAt);
 
             var added = await store.TryAddAsync(code, linkEntry, ct);
             if (added)

@@ -1,9 +1,10 @@
 namespace Shortener;
 
-public sealed class InMemoryUrlStore : IUrlStore
+public sealed class InMemoryUrlStore(TimeProvider timeProvider) : IUrlStore
 {
     private readonly Dictionary<string, LinkEntry> _store = [];
     private readonly Lock _lock = new();
+    private readonly TimeProvider _clock = timeProvider;
 
     public ValueTask<string?> GetAsync(string code, CancellationToken ct)
     {
@@ -13,6 +14,11 @@ public sealed class InMemoryUrlStore : IUrlStore
         {
             if (_store.TryGetValue(code, out LinkEntry? linkEntry))
             {
+                if (linkEntry.ExpiresAt is not null && _clock.GetUtcNow() >= linkEntry.ExpiresAt)
+                {
+                    return ValueTask.FromResult<string?>(null);
+                }
+
                 return ValueTask.FromResult<string?>(linkEntry.Url);
             }
         }
