@@ -289,6 +289,31 @@ xUnit captures the console, because tests run in parallel and a shared console w
 A public, non-readonly static field can be reassigned from anywhere, which quietly breaks every generated code. And a test that asks the code under test what is correct can't catch a wrong alphabet. Keep the constant private, and duplicate the expected set in the test (a regex or a copy).
 </details>
 
+<details><summary>Which test data can go in <code>[InlineData]</code>, and what do you do for a <code>DateTimeOffset</code> or <code>TimeSpan</code>?</summary>
+
+Only compile-time constants (numbers, strings, `null`, enums, `typeof`). `TimeSpan.FromDays(30)` and `now.AddDays(30)` aren't constants. Pass a number (seconds, or milliseconds for boundary tests) and build the value inside the test body, or use `TheoryData<...>` with `[MemberData]`. `null` works for a nullable parameter, and `int.MinValue` is allowed because it's a constant.
+</details>
+
+<details><summary>When is a <code>[Theory]</code> right, and when should you write separate <code>[Fact]</code>s?</summary>
+
+A theory fits the same logic on different data: "advance the clock by X, is the link alive?" with rows for 0, 1 ms before, exactly at, and 1 ms after expiry. Separate facts fit different setups and assertions (never-expiring link, re-adding an expired code). If you'd need an `if` on a parameter inside the test body to make rows work, split it.
+</details>
+
+<details><summary>You tested the expiry policy and the store separately, and every test passes. What can still be broken?</summary>
+
+The wiring in between. Mutation checks on the handler (store `null` instead of the computed expiry, or ignore the policy's 400) both left all 96 tests green. A feature has logic and wiring, and both need a test that fails when they're removed. Unit tests of the parts don't protect the endpoint that connects them.
+</details>
+
+<details><summary>A test depends on a side effect of one call (an eviction on read). How does the order of calls matter?</summary>
+
+The call that triggers the side effect must come before the call that observes it. In the re-add test, `GetAsync` after `TryAddAsync` passed even with an evict-on-read bug: the add had already failed (the entry was still there), and the eviction happened afterwards. Swapping to read first, then re-add, made the same mutation fail. Same assertions, different order, completely different power.
+</details>
+
+<details><summary>Why do assertions like <code>Assert.False(string.IsNullOrWhiteSpace(error))</code> miss bugs?</summary>
+
+They pass for any text, so a message saying "between 0 and 0" (from using `TimeSpan.Seconds`) went through. When a message states a rule clients rely on, assert a distinctive part of its content (`Assert.Contains("31536000", error)`).
+</details>
+
 ## 7. Tooling and workflow
 
 <details><summary>Do you need <code>git mv</code> to keep history?</summary>
@@ -383,5 +408,77 @@ Switching back to `Random` passes every black-box test, since it is statisticall
 <details><summary>You remove a character from the alphabet. Which test notices, and which doesn't?</summary>
 
 The uniformity test fails (the missing character never appears, so chi-squared explodes). The "every character is in the allowed set" test still passes, because everything generated is still allowed. The two tests cover opposite failures: unexpected characters, and missing or skewed ones.
+</details>
+
+## 10. Time, expiry and TimeSpan
+
+<details><summary>Expiry has two jobs. What are they, and which one makes it correct?</summary>
+
+Correctness: checking the clock on every read (lazy expiry), so an expired link never redirects. Cleanup: a background sweep that frees the memory of dead entries. Only the lazy check makes it correct. Without it, a link would keep redirecting until the next sweep, and with only lazy checks, links nobody visits again would leak memory. Terminology: "lazy expiry" here means the expiry is *evaluated at read time*, and nothing is removed on read (we deliberately don't evict, see the code-reuse card below). In Redis and many caches, "lazy expiration" instead means *deleting the expired key when it is accessed*, so say which one you mean.
+</details>
+
+<details><summary>Should an expired link return 404 or 410, and what does 410 cost?</summary>
+
+404 says "I don't know this code". 410 says "this existed and was removed", which helps crawlers drop the URL and lets a person see "expired". It costs storage: you must remember the code after expiry. A tombstone (code plus expiry, about 40 to 50 bytes, with the URL dropped) still grows without bound, so bound it with a retention window (for example 30 days, then 404). It also leaks that a code was once valid, which helps someone scanning for codes. With a database it's nearly free, since the row stays until a cleanup deletes it. v1 uses 404.
+</details>
+
+<details><summary>Why keep an expired entry occupying its code instead of evicting it on read?</summary>
+
+If a read evicts it, the code becomes free, a new link can randomly draw it, and anyone still holding the old link lands on the new owner's page. An expired entry stays until the sweep decides, and reads never release it. The test needs the read to come before the re-add, or an evicting implementation passes it.
+</details>
+
+<details><summary>Absolute or sliding expiry, and which did we pick?</summary>
+
+Absolute: a fixed deadline stored as `ExpiresAt`. Sliding refreshes the deadline on every click, which turns every read into a write on the hot path and conflicts with caching later. Storing an absolute time (not "created plus TTL") also lets each link have its own lifetime, and changing the default later doesn't alter old links.
+</details>
+
+<details><summary>Why <code>DateTimeOffset</code> instead of <code>DateTime</code> for an expiry?</summary>
+
+`DateTime` has a hidden `Kind` (`Utc`, `Local`, `Unspecified`), and `==`, `<` and `>` ignore it. Measured: `DateTime` Local 20:00 and Utc 12:00 on a UTC+8 machine, the same instant, compared equal as `False`. `DateTimeOffset` names one exact instant, and compares by the underlying UTC moment: 12:00+00:00 and 20:00+08:00 gave `==: True`. Use it for instants. `DateTime` is only for a calendar date or time of day with no zone.
+</details>
+
+<details><summary>UTC or local time for the logic, and what about input from clients?</summary>
+
+UTC everywhere in the code (`GetUtcNow()`, never `GetLocalNow()` for logic). Convert to local only when displaying. A client-supplied time with an offset is fine, because `DateTimeOffset` compares instants. A time with no offset is ambiguous (the parser has to guess), so reject it or take a duration instead.
+</details>
+
+<details><summary>Why take <code>expiresInSeconds</code> (a duration) and not a timestamp or a <code>TimeSpan</code>?</summary>
+
+The server computes `now + duration` from its own clock, which avoids wrong client clocks and missing time zones. Integer seconds are language-neutral and the unit is in the name. A `TimeSpan` field uses .NET's format (`"30.00:00:00"`): measured, it rejected `"PT1H"`, `"1h"` and `3600`, accepted a negative value, and accepted a duration of about 29,000 years, so you'd range-check anyway. Keep primitives on the wire and `TimeSpan` inside the code.
+</details>
+
+<details><summary>What validation does a client-supplied lifetime need?</summary>
+
+A minimum, a maximum and a default. Without a minimum, zero or a negative value creates a link that is dead on arrival while the API returns 201. Without a maximum, absurd values are accepted (and a huge one can overflow date arithmetic into a 500). The message should state the range and not echo the input. Check the range before computing.
+</details>
+
+<details><summary>What is the C# type for a duration, and what is <code>TimeSpan.Duration()</code>?</summary>
+
+`TimeSpan` (Java and Go call it `Duration`). The method `Duration()` is unrelated to the type name: it returns the absolute value of a span. A `DateTimeOffset` is a point on the timeline and a `TimeSpan` is the distance between two points. A `TimeSpan` has no months or years (use `AddMonths` on the date), stores 100 ns ticks, can be negative, and `TimeOnly` (not `TimeSpan`) is for a time of day.
+</details>
+
+<details><summary><code>TimeSpan.Seconds</code> versus <code>TimeSpan.TotalSeconds</code>?</summary>
+
+`Seconds` is the seconds component (0 to 59), like the last part of `01:02:03`. `TotalSeconds` is the whole length in seconds. For 1 minute, `Seconds` is 0 and `TotalSeconds` is 60. Using `Seconds` made every range check reject all non-zero values, accept 0, and print "between 0 and 0" in the error message. The same applies to `Minutes` versus `TotalMinutes` and `Days` versus `TotalDays`. Compare `TimeSpan`s directly where you can.
+</details>
+
+<details><summary>What is wrong with assigning the default first, then returning early only inside the <code>if</code>?</summary>
+
+If the early path doesn't `return`, control falls through and the later assignment overwrites the result: the requested expiry was silently replaced by the 30-day default. Compute one `lifetime` value first, validate it, assign the output once, and return once.
+</details>
+
+<details><summary>Is <code>TimeProvider</code> registered in an ASP.NET Core app by default?</summary>
+
+No (checked on a fresh `dotnet new web`). Register it with `builder.Services.AddSingleton(TimeProvider.System)`; otherwise the first resolve fails with "Unable to resolve service". Tests replace it the same way as any service: `services.AddSingleton<TimeProvider>(fakeClock)`.
+</details>
+
+<details><summary>Which package gives you <code>FakeTimeProvider</code>, and how do you use it?</summary>
+
+`Microsoft.Extensions.TimeProvider.Testing`, in the test project only. The namespace differs from the package name: `Microsoft.Extensions.Time.Testing`. It is a `TimeProvider`, so pass it anywhere. Give it a fixed start time. The default start is `2000-01-01T00:00:00+00:00`. `Advance(TimeSpan)` only moves forward. Declare the variable as `FakeTimeProvider`, not `TimeProvider`, or you can't call `Advance`.
+</details>
+
+<details><summary>Can you write <code>readonly const</code> or <code>static readonly</code> in <code>Program.cs</code>?</summary>
+
+No. `const` is already read-only (and implicitly static on a class member), so `readonly const` is error CS0106. In a top-level-statements file those lines are locals of the generated `Main`, and locals allow only `const`: `static readonly` there fails with CS0106 too. Use `static readonly` for values that aren't compile-time constants (`TimeSpan`) and for public values shared across assemblies (a changed `const` is baked into consumers until they rebuild). PascalCase is the C# style for constants (`MaxAttempts`).
 </details>
 
