@@ -319,6 +319,36 @@ The call that triggers the side effect must come before the call that observes i
 They pass for any text, so a message saying "between 0 and 0" (from using `TimeSpan.Seconds`) went through. When a message states a rule clients rely on, assert a distinctive part of its content (`Assert.Contains("31536000", error)`).
 </details>
 
+<details><summary>A sweep test asserts only the returned count. Which bugs does it miss?</summary>
+
+A count checks a quantity, not an identity. With groups of 5 expired, 5 live and 5 never-expiring entries, a sweep that removes the *live* group instead returns 5 too, and the test passes. Use different group sizes (3, 9, 9, 5) so a swapped group gives a wrong count, and read every entry back so the test can see *which* ones are gone.
+</details>
+
+<details><summary>Why can <code>GetAsync</code> not prove that <code>Sweep</code> removed an entry?</summary>
+
+`GetAsync` already treats an expired entry as missing, so it returns `null` whether or not the sweep removed it. A mutation that counted entries without removing them passed every read-back assertion. Observe removal with something the read-time check doesn't mask: a second `Sweep()` must return 0 (an un-removed entry would be found again), or `TryAddAsync` on the code must succeed (an un-removed entry still occupies it).
+</details>
+
+<details><summary>A test helper skips an entry when <code>TryAddAsync</code> returns false. What is the risk?</summary>
+
+The failed add vanishes from the returned list, and any assertion looping over that list passes vacuously, checking nothing. In this case a count assertion happened to catch it, but a reused helper would not. Make the helper assert its own setup (`Assert.True(await store.TryAddAsync(...))`) so a broken setup fails at the line that caused it.
+</details>
+
+<details><summary>How do you stop assertions from knowing how a test helper builds its data?</summary>
+
+Have the helper return what it added, as a named tuple (`IReadOnlyCollection<(string Code, string Url)>`), and assert over that list. The assertions then don't repeat the URL format (`$"https://example.com/{prefix}/{i}"`), they can't drift when the helper changes, and `entry.Code` reads better than `Item1`.
+</details>
+
+<details><summary>You re-add a swept code and then call <code>Assert.Equal(1, store.Sweep())</code>, but it returns 0. Who is wrong?</summary>
+
+The test. `Sweep()` returns how many entries it removed, and the re-added entry (expiring at +3 h, with the clock at +2.5 h) wasn't expired, so 0 is correct. The `1` was right only for the *first* sweep. Draw the timeline (when each entry expires, where the clock is) before asserting a count. Also read the entry back (`GetAsync` is not null), because a sweep that skipped everything would also return 0.
+</details>
+
+<details><summary>A "re-add after a sweep" test passes even if the store keeps the old entry. Why?</summary>
+
+It re-added an entry that was already expired (the old expiry time, with the clock moved on), and with the same URL. It could assert only that `TryAddAsync` returned `true`. Re-add with a future expiry and a different URL, then check `GetAsync` returns the new URL: only the new entry can produce that answer.
+</details>
+
 ## 7. Tooling and workflow
 
 <details><summary>Do you need <code>git mv</code> to keep history?</summary>
@@ -485,5 +515,72 @@ No (checked on a fresh `dotnet new web`). Register it with `builder.Services.Add
 <details><summary>Can you write <code>readonly const</code> or <code>static readonly</code> in <code>Program.cs</code>?</summary>
 
 No. `const` is already read-only (and implicitly static on a class member), so `readonly const` is error CS0106. In a top-level-statements file those lines are locals of the generated `Main`, and locals allow only `const`: `static readonly` there fails with CS0106 too. Use `static readonly` for values that aren't compile-time constants (`TimeSpan`) and for public values shared across assemblies (a changed `const` is baked into consumers until they rebuild). PascalCase is the C# style for constants (`MaxAttempts`).
+</details>
+
+## 11. Background sweeping and pruning at scale
+
+<details><summary>What does <code>null</code> mean in the request and in the store, and where does 365 days come from?</summary>
+
+`expiresInSeconds` missing in the request means "use the default": 30 days, applied by `ExpiryPolicy`. `LinkEntry.ExpiresAt == null` in the store means "never expires": the store has no default, `GetAsync` skips the check and `Sweep` never matches it (`now >= null` is false). 365 days is the *maximum* a client may request, not a default. Through the API a link never has a null expiry, so that case exists only for direct store calls or a future permanent-link feature.
+</details>
+
+<details><summary>Is it worth deleting expired links, when the keyspace holds 3.5 trillion codes?</summary>
+
+The keyspace (62^7 = 3,521,614,606,208) isn't the limit. Reasons to prune are cost (a few hundred bytes per record, so 1 billion records is hundreds of GB plus indexes and replicas), privacy (target URLs can carry tokens or personal data, and a TTL is a promise), and, for the in-memory store, memory that otherwise grows until the process dies. Not pruning is viable for a long time (old data is cold), so it's mostly cost and privacy and not speed.
+</details>
+
+<details><summary>Separate the three concerns that "pruning" bundles together.</summary>
+
+Correctness (does an expired link stop redirecting? the check on read), reclaiming storage (the sweep or the database's TTL), and code reuse (may a freed code be issued again? a separate policy). Reads in this project never delete, so only the sweep frees a code.
+</details>
+
+<details><summary>Is deleting billions of expired rows a performance problem, and how do databases avoid it?</summary>
+
+A naive `DELETE ... WHERE expires_at < now` is heavy (long transactions, index churn, replication lag). Native TTL moves it off your code (Redis `EXPIRE`, DynamoDB TTL, MongoDB TTL index; Cassandra TTL writes tombstones and depends on compaction). Or partition by expiry time and drop whole partitions, which is a cheap metadata operation. Native TTL deletion lags, so readers must still check the expiry, which is exactly the read-time check in `GetAsync`.
+</details>
+
+<details><summary>How big is the code-reuse hazard once expired codes are deleted?</summary>
+
+The expected number of reissued old codes is about `old x new / 3.5 trillion`: about 28 at 10 million and 10 million, about 285,000 at 1 billion and 1 billion. It isn't attacker-controlled (codes are random), but stale links redirect to an unrelated page. Remedies: never reissue (a Bloom filter of every issued code, where a false positive just costs one extra retry, is about 1.2 GB for 1 billion codes at 1%, versus about 8 GB of stored codes), counter-based codes (never repeat, guessable unless scrambled), or a tombstone retention window (bounds storage but only delays reuse). Accepted for the in-memory store.
+</details>
+
+<details><summary>Why a separate <code>IExpirySweeper</code> and not a method on <code>IUrlStore</code>?</summary>
+
+Only the in-memory store needs it: a database store uses native TTL. A separate small interface keeps `IUrlStore` lean, and the sweeper and hosted service are registered next to the in-memory store, so they go away with it. Name it for the capability (`IExpirySweeper`), because "Async" is a method suffix by convention, not part of an interface name. Make `Sweep()` synchronous: it is CPU work under a lock, and an async signature over synchronous work is a small lie. Returning the count makes it testable and loggable.
+</details>
+
+<details><summary>One class implements <code>IUrlStore</code> and <code>IExpirySweeper</code>. Why not two <code>AddSingleton&lt;I, Impl&gt;()</code> lines?</summary>
+
+Each registration of that form creates its own singleton, so the sweeper would clean a store that no request uses, silently. Verified: `AddSingleton<IStore, Mem>()` plus `AddSingleton<ISweeper, Mem>()` gave `same instance? False`. Register the concrete class once and forward: `AddSingleton<Mem>()`, `AddSingleton<IStore>(sp => sp.GetRequiredService<Mem>())`, and the same for `ISweeper` (`True`). A test that resolves both from `factory.Services` and compares them guards the wiring.
+</details>
+
+<details><summary>Is <code>BackgroundService</code> built into .NET, and how does its lifecycle work?</summary>
+
+Yes: an abstract class in `Microsoft.Extensions.Hosting` (from the shared ASP.NET Core framework, no NuGet package). Override `ExecuteAsync(CancellationToken stoppingToken)` and register with `AddHostedService<T>()`. The host starts it with the app and cancels `stoppingToken` on shutdown, then waits up to `HostOptions.ShutdownTimeout` (30 s by default). A hosted service is a singleton, so it can take singletons through the constructor but not scoped services. Hosted services also start inside `WebApplicationFactory` test hosts.
+</details>
+
+<details><summary>What happens if a <code>BackgroundService</code> loop throws an unhandled exception?</summary>
+
+By default the whole host stops: `BackgroundServiceExceptionBehavior` is `StopHost` (verified: the log shows "BackgroundService failed", then "host stopping", then the process exits). One bad sweep would take down the shortener. Wrap each iteration in `try/catch`, log, and keep looping, but let `OperationCanceledException` through, because cancellation is how the loop is told to stop.
+</details>
+
+<details><summary>What happens on Ctrl+C to a <code>BackgroundService</code> loop built on <code>PeriodicTimer</code>?</summary>
+
+The first Ctrl+C (SIGINT) or a SIGTERM is a graceful shutdown: the host logs "Application is shutting down...", cancels `stoppingToken`, `WaitForNextTickAsync(stoppingToken)` throws `OperationCanceledException`, the loop catches it and ends, and the process exits cleanly (verified). The exception is the normal way the loop ends, not an error. A second Ctrl+C or `kill -9` gives your code no chance to run.
+</details>
+
+<details><summary>What does <code>PeriodicTimer</code> give you over a callback timer?</summary>
+
+You `await` each tick in a loop (`while (await timer.WaitForNextTickAsync(ct))`), so ticks can't overlap: a sweep longer than the interval just delays the next tick. It has a constructor taking a `TimeProvider`, which should let `FakeTimeProvider.Advance` drive it in tests (not yet verified here, check before relying on it).
+</details>
+
+<details><summary>Why cap how many entries one <code>Sweep</code> removes, and what does the cap not do?</summary>
+
+The cap bounds the work done in one lock hold (removals and the size of the copied key list), so the loop can call `Sweep` repeatedly and let requests run between batches. A burst of expiries is realistic: every link created with the 30-day default in the same hour expires in the same hour. But with a brute-force scan the cap doesn't limit the scan itself: each batch walks the dictionary again, so many batches mean more total work, with shorter pauses. A `PriorityQueue` ordered by expiry would give both. Start without a cap, measure, then optimize.
+</details>
+
+<details><summary>What are the traps in <code>_store.Where(e =&gt; now &gt;= e.Value.ExpiresAt).ToArray()</code>?</summary>
+
+`Where` is lazy, so materialize the keys (`ToArray`) before removing anything from the dictionary. Read the clock once, not inside the lambda. `now >= null` on a `DateTimeOffset?` is `false`, so never-expiring entries are skipped without an explicit check (add a comment, or write `ExpiresAt is not null`). Keep the scan, the copy and the removals inside one lock. The `Remove` result can't be false there, so counting it is redundant.
 </details>
 
