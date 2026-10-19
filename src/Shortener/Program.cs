@@ -1,7 +1,11 @@
 using Shortener;
 
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddSingleton<IUrlStore, InMemoryUrlStore>();
+
+// register multiple interfaces with the same implementation
+builder.Services.AddSingleton<InMemoryUrlStore>();
+builder.Services.AddSingleton<IUrlStore>(sp => sp.GetRequiredService<InMemoryUrlStore>());
+builder.Services.AddSingleton<IExpirySweeper>(sp => sp.GetRequiredService<InMemoryUrlStore>());
 builder.Services.AddSingleton(TimeProvider.System);
 
 var app = builder.Build();
