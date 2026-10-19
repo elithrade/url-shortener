@@ -187,6 +187,11 @@ Tells the compiler that `url` is non-null when the method returns true, so calle
 The Web SDK's implicit usings include `Microsoft.Extensions.DependencyInjection`, the plain SDK's don't. Add the `using`.
 </details>
 
+<details><summary>Why did <code>services.AddSingleton(fakeClock)</code> not replace the app's <code>TimeProvider</code>?</summary>
+
+`AddSingleton(instance)` infers the service type from the compile-time type of the argument. With `var clock = new FakeTimeProvider(...)` that is `FakeTimeProvider`, so the registration answers requests for `FakeTimeProvider` only. DI matches the exact requested type and doesn't treat it as a `TimeProvider` registration. The app asks for `TimeProvider`, so it still got `TimeProvider.System`. Measured with a probe test: `AddSingleton(clock)` resolved the fake as `False`, and `AddSingleton<TimeProvider>(clock)` resolved it as `True`. Always state the service type when substituting a fake (`AddSingleton<TimeProvider>(clock)`, `AddSingleton<IUrlStore>(store)`), and keep the variable typed as the concrete fake so the test can still call `Advance`. Later registrations of the same service type override earlier ones.
+</details>
+
 <details><summary>Do you still need <code>public partial class Program;</code> for <code>WebApplicationFactory</code>?</summary>
 
 Not in .NET 10. The SDK makes it visible, and analyzer ASP0027 flags the old workaround. (It was needed in .NET 6 to 9.)

@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Time.Testing;
 
 namespace Shortener.Tests;
 
@@ -218,6 +219,83 @@ public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>
             Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
             Assert.Equal(baseUrl + key, response.Headers.Location?.OriginalString);
         }
+    }
+
+    [Theory]
+    [InlineData(3600, 3600)]
+    [InlineData(null, 30 * 24 * 3600)] // default to 30 days
+    public async Task Accept_before_expiry_and_reject_after_expiry(
+        int? expiresInSeconds,
+        int lifeTimeInSeconds
+    )
+    {
+        DateTimeOffset now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var (client, clock) = NewFakeTimerClient(now);
+
+        var response = await client.PostAsJsonAsync(
+            "/shorten",
+            new { Url = "https://example.com/abc", ExpiresInSeconds = expiresInSeconds }
+        );
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+
+        var code = (await response.Content.ReadFromJsonAsync<ShortenResponse>())?.Code;
+        Assert.NotNull(code);
+
+        clock.Advance(TimeSpan.FromSeconds(lifeTimeInSeconds - 1));
+
+        var getResponse = await client.GetAsync($"/{code}");
+
+        Assert.Equal(HttpStatusCode.Redirect, getResponse.StatusCode);
+        Assert.Equal("https://example.com/abc", getResponse.Headers.Location?.OriginalString);
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+
+        getResponse = await client.GetAsync($"/{code}");
+        Assert.Equal(HttpStatusCode.NotFound, getResponse.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(-5, HttpStatusCode.BadRequest)]
+    [InlineData(0, HttpStatusCode.BadRequest)]
+    [InlineData(59, HttpStatusCode.BadRequest)] // just under the minimum
+    [InlineData(60, HttpStatusCode.Created)]
+    [InlineData(31536000, HttpStatusCode.Created)]
+    [InlineData(31536001, HttpStatusCode.BadRequest)] // just over the maximum
+    public async Task Expiry_boundaries_return_expected_status(
+        int expiresInSeconds,
+        HttpStatusCode expected
+    )
+    {
+        var response = await _client.PostAsJsonAsync(
+            "/shorten",
+            new { Url = "https://example.com/abc", ExpiresInSeconds = expiresInSeconds }
+        );
+
+        Assert.Equal(expected, response.StatusCode);
+        if (response.StatusCode == HttpStatusCode.BadRequest)
+        {
+            var error = await response.Content.ReadFromJsonAsync<string>();
+            Assert.Contains("31536000", error);
+        }
+    }
+
+    private (HttpClient, FakeTimeProvider) NewFakeTimerClient(DateTimeOffset now)
+    {
+        var clock = new FakeTimeProvider(now);
+
+        var factory = _factory.WithWebHostBuilder(b =>
+            b.ConfigureServices(s =>
+            {
+                s.AddSingleton<TimeProvider>(clock);
+            })
+        );
+
+        return (
+            factory.CreateClient(
+                new WebApplicationFactoryClientOptions { AllowAutoRedirect = false }
+            ),
+            clock
+        );
     }
 
     private HttpClient NewCollidingClient(CollidingStore store)
