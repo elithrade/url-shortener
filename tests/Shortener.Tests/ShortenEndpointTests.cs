@@ -279,6 +279,15 @@ public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>
         }
     }
 
+    [Fact]
+    public void IUrlStore_and_IExpirySweeper_resolve_the_same_instance()
+    {
+        var urlStore = _factory.Services.GetRequiredService<IUrlStore>();
+        var expirySweeper = _factory.Services.GetRequiredService<IExpirySweeper>();
+
+        Assert.Same(urlStore, expirySweeper);
+    }
+
     private (HttpClient, FakeTimeProvider) NewFakeTimerClient(DateTimeOffset now)
     {
         var clock = new FakeTimeProvider(now);
