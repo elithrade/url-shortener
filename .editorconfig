@@ -1,0 +1,14 @@
+# https://editorconfig.org
+root = true
+
+[*]
+indent_style = space
+indent_size = 4
+
+# project, solution, workflow and JSON files already use 2 spaces
+[*.{csproj,slnx,props,targets,yml,yaml,json}]
+indent_size = 2
+
+[*.cs]
+# ConfigureAwait only matters in libraries: ASP.NET Core has no synchronization context
+dotnet_diagnostic.CA2007.severity = none
