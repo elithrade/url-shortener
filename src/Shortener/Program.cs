@@ -7,6 +7,7 @@ builder.Services.AddSingleton<InMemoryUrlStore>();
 builder.Services.AddSingleton<IUrlStore>(sp => sp.GetRequiredService<InMemoryUrlStore>());
 builder.Services.AddSingleton<IExpirySweeper>(sp => sp.GetRequiredService<InMemoryUrlStore>());
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddHostedService<ExpirySweepService>();
 
 var app = builder.Build();
 
