@@ -168,7 +168,7 @@ Set `CodeLength` back to `7` afterwards.
 ## Roadmap
 The detailed plan, with the current milestone and status, is in `PLAN.md`. In short:
 1. ~~URL validation~~, ~~endpoint and concurrency tests~~, ~~CI~~, ~~cryptographic codes~~ (done)
-2. Expiry: the model, policy, read-time check, the store sweep (measured) and the background service that runs it are done. Left: a test that guards the DI forwarding.
+2. Expiry: done (model, policy, read-time check, the measured store sweep, and the background service that runs it).
 3. Persistence behind `IUrlStore` (a key-value store with native TTL is the likely fit).
 4. Rate limiting, configuration through `IOptions<T>`, a health endpoint, structured logging, graceful shutdown.
 5. Dockerfile, deployment and a post-deploy smoke test.

@@ -733,7 +733,19 @@ It's evidence, not proof. For tests that involve threads and timing, run them 15
 Compare the elapsed time with the timeouts in the code. A failure far faster than the total wait means the code gave up early (here a `throw` sitting inside the helper's retry loop, so it threw after the first 500 ms attempt), not that the service was slow. A test that passes against the correct code and fails against each mutant tells you the test itself is right.
 </details>
 
+<details><summary>How do you test that two interfaces share one singleton, and how do you know the test isn't vacuous?</summary>
+
+Resolve both from the app's real container and use `Assert.Same` (reference equality, with a clearer failure than `Equal`, which falls back to `Equals` and is also reference equality for a class with no override). `_factory.Services` is the root provider: touching it builds and starts the host (verified: the sweep service was already running, with no request made). Use `GetRequiredService<T>()`, which throws if nothing is registered. The first draft used `GetKeyedService<T>(key)`, which looks only at *keyed* registrations, so it returned `null` for both and `Assert.Same(null, null)` would have passed against the broken registration too. Prove such a test by mutating: with `AddSingleton<IUrlStore, InMemoryUrlStore>()` and `AddSingleton<IExpirySweeper, InMemoryUrlStore>()` it fails with "Values are not the same instance: Expected `InMemoryUrlStore { }`, Actual `InMemoryUrlStore { }`". Same type, different objects, which is the point. A test that passes both ways proves nothing.
+</details>
+
+<details><summary>What is the difference between <code>AddSingleton</code> and <code>AddHostedService</code>?</summary>
+
+`AddSingleton` registers a service that something *asks for* (created on first resolve). `AddHostedService<T>` registers an `IHostedService` that the *host calls* at startup and shutdown, whether or not anything depends on it. In a `WebApplicationFactory` host the probe listed two `IHostedService` registrations: `ExpirySweepService` and ASP.NET's own `GenericWebHostService`. So the sweep service runs inside every endpoint test, against the real clock unless the test replaces it, which is harmless for tests that finish in milliseconds.
+</details>
+
 ## 14. Analyzer warnings, logging and `.editorconfig`
+
+
 
 <details><summary>The editor shows a warning on a line but <code>dotnet build</code> shows none. Why, and how do you reproduce it?</summary>
 
