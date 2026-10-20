@@ -46,6 +46,14 @@ Legend: `[x]` done, `[ ]` to do.
 | 3 | Nov 2 to 6 | Milestones 6, 7: rate limiting, config, health, logging, Dockerfile |
 | 4 | Nov 9 to 13 | Milestone 8: deploy, smoke test, README. **v1 live** |
 
+## After v1: mock-interview drill
+Once v1 is live, before Line 2: ask the coach to quiz you from `LESSONS.md`.
+- Cold questions: you answer from memory, and the card is revealed afterwards.
+- Weight the session towards cards you got wrong or found hard (`SemaphoreSlim`, shutdown handling, fake-clock tests).
+- Mix formats: bug-hunting snippets (Mode 1), "what would you test here?" (Mode 2), and trade-off questions (Mode 3), not only recall.
+- Include the cards where the coach was wrong (for example `StartAsync` timing), as traps.
+- Record the weak spots afterwards, and add or fix cards for them.
+
 ## Line 2: system design practice
 Optional for v1, and the main place for learning trade-offs. Start after v1 is live. Each item is a small project with its own write-up.
 
