@@ -11,7 +11,7 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It'
 - `GET /{code}` redirects to the stored URL with `302 Found`, or returns `404` if the code is unknown or expired.
 - In-memory store (`Dictionary` guarded by a `Lock`) behind an `IUrlStore` interface. Entries are `LinkEntry(Url, ExpiresAt)`, and the expiry is checked on every read against an injected `TimeProvider`.
 - Bounded retry on code collisions: up to 5 attempts, then `503`.
-- `InMemoryUrlStore` also implements `IExpirySweeper.Sweep()`, which removes expired entries and is tested. **A background service that calls it periodically is not wired in yet**, so for now expired entries stay in memory (they are never served, but they are not freed either).
+- `InMemoryUrlStore` also implements `IExpirySweeper.Sweep()`, which removes expired entries and is tested. `ExpirySweepService` (a `BackgroundService` with a `PeriodicTimer`) calls it every 60 seconds, so expired entries are freed shortly after they expire (they are never served in the meantime, because reads check the expiry).
 
 ## Run
 ```bash
@@ -27,9 +27,10 @@ dotnet test
 - `CodeGeneratorTests`: length, alphabet, distinctness, edge lengths, and a chi-squared uniformity test that fails against the biased `byte % 62` generator.
 - `ExpiryPolicyTests`: the default, the minimum and maximum, and out-of-range values.
 - `InMemoryStoreTests`: concurrency (same key gives exactly one winner, and many distinct keys are all stored), expiry on read (alive 1 ms before, gone exactly at expiry, never-expiring entries), and the sweep (removes only expired entries, a second sweep removes nothing, a swept code can be added again). Time is controlled with `FakeTimeProvider`, so nothing sleeps.
+- `ExpirySweepServiceTests`: the background service with a fake sweeper and a `FakeTimeProvider`: it sweeps once per interval and not before, keeps running after a sweep throws, and stops cleanly (nothing sweeps after stop).
 - `ShortenEndpointTests`: the real pipeline in memory with `WebApplicationFactory`: the round trip, error responses, canonical `Location` headers, the retry limit and `503` path using a fake store (`CollidingStore`), 200 concurrent POSTs, and expiry through the endpoint with a fake clock.
 
-Most tests were mutation-checked: the code was deliberately broken in a scratch copy (a removed lock, `>=` changed to `>`, an off-by-one retry, a biased generator) to confirm that a test fails.
+Most tests were mutation-checked: the code was deliberately broken in a scratch copy (a removed lock, `>=` changed to `>`, an off-by-one retry, a biased generator, a wrong sweep interval) to confirm that a test fails.
 
 ## CI
 `.github/workflows/ci.yml` builds in Release and runs `dotnet test` on every push to `main` and on pull requests. The `main` branch has a ruleset that requires the `build` check and blocks force-pushes and deletion. The repository admin can bypass it, so for the owner the gate is advisory.
@@ -39,6 +40,7 @@ Most tests were mutation-checked: the code was deliberately broken in a scratch 
 Shortener.slnx
 src/Shortener/            the web app
 tests/Shortener.Tests/    unit and endpoint tests
+.editorconfig             4-space indent (2 for project, yml and json files)
 PLAN.md                   roadmap and current milestone
 LESSONS.md                self-test flashcards
 AGENTS.md                 instructions for AI coding agents (CLAUDE.md points to it)
@@ -161,11 +163,12 @@ Set `CodeLength` back to `7` afterwards.
 - **Reads never delete.** An expired entry keeps occupying its code until a sweep removes it, so a code isn't reissued while stale links may still circulate. After a sweep the code can be reused. That is accepted for the in-memory store. At large scale the persistent store should use native TTL plus a never-reissue policy (see `PLAN.md`).
 - **Time is injected** (`TimeProvider`, registered as `TimeProvider.System`), so tests advance a `FakeTimeProvider` instead of sleeping.
 - **`IExpirySweeper` is a separate interface** implemented only by the in-memory store, because a database store would use native TTL. The in-memory store is registered once and both interfaces forward to that single instance.
+- **The sweep runs in a background service.** The host calls `ExecuteAsync` once, so the service owns the loop. A failed sweep is caught and logged inside the loop and the next tick still runs, and only a cancellation from shutdown ends the loop. The sweep is an O(n) scan that holds the store's lock, so concurrent reads wait for it (measured: about 11 ms per million entries when nothing expires, and about 46 ms when everything does).
 
 ## Roadmap
 The detailed plan, with the current milestone and status, is in `PLAN.md`. In short:
 1. ~~URL validation~~, ~~endpoint and concurrency tests~~, ~~CI~~, ~~cryptographic codes~~ (done)
-2. Expiry: the model, policy, read-time check and store sweep are done. Next: measure the sweep, then a background service that runs it periodically.
+2. Expiry: the model, policy, read-time check, the store sweep (measured) and the background service that runs it are done. Left: a test that guards the DI forwarding.
 3. Persistence behind `IUrlStore` (a key-value store with native TTL is the likely fit).
 4. Rate limiting, configuration through `IOptions<T>`, a health endpoint, structured logging, graceful shutdown.
 5. Dockerfile, deployment and a post-deploy smoke test.

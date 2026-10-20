@@ -571,7 +571,7 @@ The first Ctrl+C (SIGINT) or a SIGTERM is a graceful shutdown: the host logs "Ap
 
 <details><summary>What does <code>PeriodicTimer</code> give you over a callback timer?</summary>
 
-You `await` each tick in a loop (`while (await timer.WaitForNextTickAsync(ct))`), so ticks can't overlap: a sweep longer than the interval just delays the next tick. It has a constructor taking a `TimeProvider`, which should let `FakeTimeProvider.Advance` drive it in tests (not yet verified here, check before relying on it).
+You `await` each tick in a loop (`while (await timer.WaitForNextTickAsync(ct))`), so ticks can't overlap: a sweep longer than the interval just delays the next tick. It has a constructor taking a `TimeProvider`, and `FakeTimeProvider.Advance` does drive it (verified: 59 s gives no tick, 60 s completes it). Missed ticks are coalesced into one, only one wait may be pending at a time, and disposing the timer ends a pending wait with `false`.
 </details>
 
 <details><summary>Why cap how many entries one <code>Sweep</code> removes, and what does the cap not do?</summary>
@@ -659,5 +659,104 @@ No. The same sweep allocated 29 MB on its first run and 15 MB on the second, and
 <details><summary>Can you remove entries from a <code>ConcurrentDictionary</code> while enumerating it?</summary>
 
 Yes: the enumerator is safe against concurrent modification. Use `TryRemove(pair)` (the overload that takes a <code>KeyValuePair</code>), which removes the entry only if it still holds that value, so a concurrent replacement isn't removed by mistake. The enumeration is not a snapshot, so a sweep may or may not see entries added after it started, which doesn't matter for a sweep.
+</details>
+
+## 13. A background service: the loop, shutdown and testing it
+
+<details><summary>How often does the host call <code>ExecuteAsync</code>, and why does the service need a timer inside it?</summary>
+
+Once, when the app starts (verified: a hosted service with no loop printed "ExecuteAsync called (call #1)", returned after 300 ms, was never called again, and the host kept running). The host only knows how to start and stop a service, and has no idea of "periodic". `ExecuteAsync` is the `Main` of a long-running task: if it returns, the service is finished and the host does not restart it. So "every 60 seconds" is a loop you write inside that one call.
+</details>
+
+<details><summary>Why a <code>PeriodicTimer</code> loop, and not <code>Task.Delay</code> in a loop, a <code>System.Threading.Timer</code>, or a scheduler library?</summary>
+
+`Task.Delay` in a loop drifts (the interval is 60 s plus the work), a callback `Timer` can overlap ticks when a run is slow, and Quartz or Hangfire are right for cron schedules, persistence or many jobs but far too heavy for one housekeeping loop. `PeriodicTimer` gives sequential awaited ticks with no overlap, coalesces missed ticks into one, ends on cancellation or dispose, and takes a `TimeProvider`, so it is testable.
+</details>
+
+<details><summary>Which exception do you catch when the app stops, and why not just check <code>stoppingToken.IsCancellationRequested</code> in the loop?</summary>
+
+`OperationCanceledException` (`TaskCanceledException` derives from it). Catch it with a filter, `when (stoppingToken.IsCancellationRequested)`, so only a shutdown cancellation counts as normal. A check inside the loop can't replace it: the loop spends almost all its time parked in `await timer.WaitForNextTickAsync(stoppingToken)`, which throws the moment the token is cancelled, so the check never runs. Without the token, shutdown stalls until the next tick. A check followed by an await can also be overtaken by cancellation between the two lines, and the exception from the wait closes that gap. It is thrown once, at shutdown.
+</details>
+
+<details><summary>Where does the per-sweep <code>try/catch</code> go, and what happens if it wraps the whole loop?</summary>
+
+Inside the loop, around the `Sweep()` call, with no `return`: log and let the loop continue (`catch (Exception ex) when (ex is not OperationCanceledException)`). If the `try` wraps the whole `while`, or the catch returns, one failed sweep ends `ExecuteAsync`, the host does not restart it, and nothing sweeps again until the process restarts, with a single error line in the log. A separate outer `catch (OperationCanceledException)` around the loop handles shutdown.
+</details>
+
+<details><summary>What does the host do if an <code>OperationCanceledException</code> escapes <code>ExecuteAsync</code> during a graceful shutdown?</summary>
+
+It ignores it (verified: a clean exit with code 0 and no error logs). So `StopAsync` succeeds either way and can't tell you whether your catch works. `BackgroundService.ExecuteTask` can: `IsCompletedSuccessfully` means the loop ended through your catch, and a cancelled or faulted task means the exception escaped.
+</details>
+
+<details><summary>Does <code>BackgroundService.StartAsync</code> run <code>ExecuteAsync</code> up to its first <code>await</code> before returning?</summary>
+
+Not in .NET 10 (I told you it did, and I was wrong). The source runs it as `Task.Run(() => ExecuteAsync(stoppingToken))` and returns a completed task immediately, so the loop starts a moment later on another thread. Earlier versions ran it synchronously until the first await. Consequence for tests with a fake clock: if you `Advance` straight after `StartAsync`, the timer may not exist yet, so its first tick is due a full interval after the *new* time and nothing ever fires. The symptom was a `Calls=0` failure, with the service still running and waiting.
+</details>
+
+<details><summary>How do you test a loop that starts on another thread, with a fake clock?</summary>
+
+Don't guess a delay. Advance one interval at a time and wait briefly for the first sweep, repeating a few times: `for (attempt < 10) { clock.Advance(interval); if (await sweeper.WaitForCallAsync(500 ms)) return; }` then `throw` *after* the loop. From the first sweep on, the timer exists. (A `throw` placed inside the loop gave up after the first attempt, which is exactly the attempt the helper exists for.) This helper also works for the failure test, because the fake signals before it throws.
+</details>
+
+<details><summary>What is a <code>SemaphoreSlim</code>, and how does a test use it as a signal?</summary>
+
+A counter you can await. `Release()` adds a permit, and `await WaitAsync(timeout)` takes one, waiting without blocking a thread if there is none, and returns `false` on timeout. Used as a lock it starts at 1 (one thread at a time). Used as a signal it starts at 0: the fake sweeper rings it on every call, and the test waits for a ring. Counting means a call that happens before the test starts waiting isn't lost. Rules: signal *before* throwing so the test can see failed calls; consume one permit per expected call (a leftover permit from call 1 would satisfy a wait for call 2 and make the test pass for the wrong reason); always give the wait a timeout so a broken service fails instead of hanging. Unlike `lock`, `WaitAsync` can be awaited.
+</details>
+
+<details><summary>How long should a test wait for something that should happen, and for something that should not?</summary>
+
+Long (5 s) for an expected event, because it returns the moment the event happens, so it costs nothing and a slow machine can't cause a false failure. Short (about 100 ms) for an expected silence, since you can only wait a limited real time to show nothing happened. A silence check can give a false pass but never a false failure, so it can't make the suite flaky. A 100 ms wait for an expected call is a flaky test.
+</details>
+
+<details><summary>A single "advance 59 s: nothing; advance 1 s: a sweep" check passed against a 90-second interval. Why?</summary>
+
+Coincidence of phase: after the helper's two 60 s advances the fake clock stood at 120 s, and the next 90 s tick (at 180 s) was due exactly 60 s later, so "59 s: nothing, then 1 s: a sweep" happened to fit. The next 90 s tick would be at 270 s, so the second pair (ending at 240 s) fails. Repeat the pair three times and the coincidence is impossible. Mutate to several wrong values (60 hours, 30, 59, 61, 90, 120 s) and don't trust a test that you only ran against the first mutant that came to mind.
+</details>
+
+<details><summary>Your shutdown test passes against a correct service, but hangs forever against one that ignores the stop token. How do you fix the test?</summary>
+
+`StopAsync(CancellationToken.None)` waits as long as it takes, and with a fake clock no tick ever arrives to end the loop, so the test hangs (verified: killed by my 60 s limit) and stalls CI until the job's global timeout. Pass a token that expires, `new CancellationTokenSource(TimeSpan.FromSeconds(5))`: `StopAsync` gives up waiting, `ExecuteTask` isn't complete, and the assertion fails after about 5 s. A hang is worse than a failure, so run mutation checks under a hard time limit (`timeout 60 dotnet test`).
+</details>
+
+<details><summary>What are we testing when a service is given a fake sweeper, and why not the real store?</summary>
+
+The service's own responsibilities: when it sweeps (every interval, not before), that it survives a failed sweep, and that it stops cleanly. The sweep logic is already covered by the store tests. A fake isolates the service (a failing test can only be the service's fault) and lets you force a failure the real store never produces. It is a spy: it counts calls, can be told to throw on a chosen call, and signals each call.
+</details>
+
+<details><summary>Is a test that passed 15 times in a row reliable?</summary>
+
+It's evidence, not proof. For tests that involve threads and timing, run them 15 to 20 times (`for i in $(seq 1 20); do dotnet test --no-build --filter ...; done`) and also run the mutations. The three service tests passed 20 of 20 runs, and each mutation failed them.
+</details>
+
+<details><summary>A test failed after 514 ms and the message says "never swept", yet the helper waits up to 5 s. How do you read that?</summary>
+
+Compare the elapsed time with the timeouts in the code. A failure far faster than the total wait means the code gave up early (here a `throw` sitting inside the helper's retry loop, so it threw after the first 500 ms attempt), not that the service was slow. A test that passes against the correct code and fails against each mutant tells you the test itself is right.
+</details>
+
+## 14. Analyzer warnings, logging and `.editorconfig`
+
+<details><summary>The editor shows a warning on a line but <code>dotnet build</code> shows none. Why, and how do you reproduce it?</summary>
+
+Many analyzer rules are off or only a hint in the default build, while the editor shows hints. Build with all of them on to see them: `dotnet build -c Release -p:AnalysisMode=All --no-incremental`, and filter the output for the file. The rule id (CA2007, CA1873 and so on) tells you what it wants.
+</details>
+
+<details><summary>What is CA2007 (consider calling <code>ConfigureAwait</code>), and should you act on it?</summary>
+
+It is written for libraries: `ConfigureAwait(false)` stops a continuation being forced back onto a caller's synchronization context (a UI thread, old ASP.NET), which can deadlock. ASP.NET Core has no synchronization context, so in an app it changes nothing; Microsoft's guidance is to turn it off for application code. Put `dotnet_diagnostic.CA2007.severity = none` under `[*.cs]` in a repo-root `.editorconfig`.
+</details>
+
+<details><summary>What do <code>indent_style</code> and <code>indent_size</code> in <code>.editorconfig</code> do, and why add exceptions?</summary>
+
+They set the default indentation for editors, and `csharpier` reads them too. Make 4 spaces the default (`[*]`), but keep `csproj`, `slnx`, `yml` and `json` at 2, because the existing files use 2 and editors would otherwise indent new lines inconsistently. Check first: this repo had no tab-indented files.
+</details>
+
+<details><summary>Which logging mistakes do CA2254, CA2253 and CA1873 flag?</summary>
+
+CA2254: the message template must not vary between calls, so `LogInformation($"{n} swept")` is wrong, because every call is a different message and structured logging can't group them. Use `LogInformation("Swept {Count}", n)`. CA2253: a placeholder name shouldn't be only digits (`{1}`), which also looks like a `string.Format` index. CA1873: measured in a scratch project, it fires on *any* log call with arguments that isn't guarded by `IsEnabled` (a local `int`, a `string` parameter, a method call, all of them), and not on calls with no arguments, the exception-only overload, or an `IsEnabled`-guarded call. The reason is that arguments are put in a params array (and value types boxed) even when the level is off.
+</details>
+
+<details><summary>What is the idiomatic fix for those logging rules?</summary>
+
+`[LoggerMessage]` source-generated methods: make the class `partial`, declare `[LoggerMessage(Level = LogLevel.Information, Message = "Swept {Count} entries")] private partial void LogSwept(int count);`, and call it. The generator validates the template at compile time and checks `IsEnabled` before formatting, which clears CA1848, CA1873, CA2253 and CA2254 together. An `Exception` parameter is passed to the logger as the exception, so the message needs no placeholder for it. It also compiled once the explicit `_logger` field was removed and only the primary-constructor parameter `logger` remained, so the generator accepts that (I had said it needed the field). For a log line that runs once a minute, silencing CA1873 in `.editorconfig` would also have been defensible.
 </details>
 
