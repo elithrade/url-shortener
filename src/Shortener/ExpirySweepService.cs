@@ -8,7 +8,6 @@ public sealed partial class ExpirySweepService(
 {
     private readonly IExpirySweeper _sweeper = sweeper;
     private readonly TimeProvider _clock = clock;
-    private readonly ILogger<ExpirySweepService> _logger = logger;
 
     const int DefaultIntervalSeconds = 60;
 
