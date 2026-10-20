@@ -584,3 +584,80 @@ The cap bounds the work done in one lock hold (removals and the size of the copi
 `Where` is lazy, so materialize the keys (`ToArray`) before removing anything from the dictionary. Read the clock once, not inside the lambda. `now >= null` on a `DateTimeOffset?` is `false`, so never-expiring entries are skipped without an explicit check (add a comment, or write `ExpiresAt is not null`). Keep the scan, the copy and the removals inside one lock. The `Remove` result can't be false there, so counting it is redundant.
 </details>
 
+## 12. Measuring the sweep, and choosing the collection
+
+<details><summary>How do you measure the cost of a sweep in a way that means something?</summary>
+
+Two numbers, not one: how long the sweep takes, and how long a concurrent reader is blocked. Use a throwaway console project and not a unit test (timings make flaky tests), in a Release build, with a warm-up run so JIT time isn't counted, and report the median of several runs. Put a reader on a dedicated thread (not the thread pool) that times each `GetAsync` and keeps the worst, and sweep from the main thread. Run several data shapes: nothing expired (pure scan cost), 10% expired (typical), all expired (worst case). Check the result is right (the removed count) so a fast wrong answer can't win.
+</details>
+
+<details><summary>The reader and the sweeper never share a lock in the experiment. How do they interact, and how do the threads coordinate?</summary>
+
+The data-level interaction is the store's own private `_lock`: `GetAsync` and `Sweep` both enter it, so a read that arrives during a sweep waits at `lock` until the sweep leaves. The experiment's lifecycle uses a "ready" poll (wait until the reader has done 1,000 iterations), a `Volatile` stop flag, and `Thread.Join`, which also guarantees the main thread then sees the reader's final writes. Polling and sleeps are timing assumptions; a `ManualResetEventSlim` and a `CancellationToken` are the tidier equivalents. The reader's worst latency is always slightly larger than the sweep time, because it can only finish after the lock is released.
+</details>
+
+<details><summary>Your benchmark reports "memory 199 MB -> 2 MB" for a sweep that removed nothing. What went wrong?</summary>
+
+The store was no longer referenced after the sweep, so in a Release build the JIT treats it as dead and the GC freed it before the "after" reading. Call `GC.KeepAlive(store)` after the last measurement. A number that looks too good deserves a second look before it goes in a table.
+</details>
+
+<details><summary>How does the sweep scale with the number of entries, and is O(n) acceptable?</summary>
+
+Linearly, measured with `Dictionary` + one lock: about 8 to 11 ms per million entries to scan, 46 to 54 ms per million when everything expires (removing and copying cost about four times the scan). 1M entries: 11 ms none expired, 17 ms at 10%, 46 ms all expired. 5M all expired: 269 ms. A full scan is O(n) in the total number of entries, and at this scale (and with a sweep every minute) that is the correct, simple solution: a realistic load removes only a few thousand entries per sweep. It is not the only option (a `PriorityQueue` ordered by expiry would be O(k log n) for k expired entries), but you add that only when the measured number says the scan is a problem.
+</details>
+
+<details><summary>How long is a reader blocked while a lock-based sweep runs?</summary>
+
+For the whole sweep. Worst read latency equalled the sweep time (41 ms at 1M all expired, 270 ms at 5M), against about 0.05 ms when idle, because the sweep holds the lock from the scan to the last removal. Average latency hides this: one stalled request is the cost.
+</details>
+
+<details><summary>What changed with a <code>ConcurrentDictionary</code> store, and what did it cost?</summary>
+
+Measured on 1M entries with the same interfaces: the reader was never blocked (worst 0.01 to 0.25 ms), but the sweep was 3 to 7 times slower (56 ms scan-only against 10 ms, 152 ms all expired against 41 ms) and memory was about 10% higher (218 MB against 199 MB), because each entry is its own node object. Read throughput with no sweep: 1 thread equal (about 74 million reads/s); 2 threads 133 against 51 million; 4 threads 303 against 25 million; 8 threads 484 against 15 million. With the lock, adding threads makes it slower (73, 51, 25, 15 million), which is what contention on one lock looks like (not profiled). A concurrent collection trades slower, more allocation-heavy writes and removals for reads that never wait.
+</details>
+
+<details><summary>A benchmark shows 484 million reads/s against 15 million. Does that mean you should switch collections?</summary>
+
+Not on its own. The loop does nothing except look up a key (about 14 ns), while a real request spends microseconds in Kestrel. At 4,000 requests per second the lock is held roughly 0.02% of the time, so contention is irrelevant at this load. The sweep stall (41 ms against a 10 to 50 ms p99 target) is the number that affects users. Check what a micro-benchmark actually exercises before drawing a conclusion from its ratio.
+</details>
+
+<details><summary>When should you reach for <code>ConcurrentDictionary</code>, and when keep <code>Dictionary</code> + <code>lock</code>?</summary>
+
+Reach for it when many threads do independent single-key reads and writes and you want reads that never wait, or when you can't state what a lock would need to protect. It doesn't make compound operations atomic: a check-then-act across entries, a sweep that must be consistent with adds, `GetOrAdd` (its value factory can run more than once), and `Count`, `ToArray`, `Keys`, `Values` and `Clear`, which take every lock. Keep a plain `Dictionary` with one lock when you need a multi-step invariant, the load is modest, and you can write down exactly what the lock protects (it is simpler to audit, and the sweep is faster). Either way, measure, and re-run the concurrency tests: the "remove the lock" mutation no longer exists, so the equivalent bug is a non-atomic add.
+</details>
+
+<details><summary>How is <code>ConcurrentDictionary</code> built, so that reads never block?</summary>
+
+(Read from the `dotnet/runtime` source on `main`, in `System.Private.CoreLib`; the .NET 10 release may differ in small ways.) All state sits in one `volatile Tables _tables` reference. `Tables` holds the bucket array (each bucket is the head of a chain of heap `Node`s with a `volatile _next`), an array of locks (default `Environment.ProcessorCount`, each guarding a section of buckets) and a count per lock. `TryGetValue` takes no lock: it reads `_tables`, reads the bucket with an acquire barrier, and walks the chain. `TryAdd` and `TryRemove` take the one stripe lock for the key's bucket, and `TryRemove(pair)` compares the value with `EqualityComparer<TValue>.Default` before unlinking. The enumerator is lock-free and safe alongside writes, but is not a snapshot: it may show changes made after it started. Operations that need a consistent whole (`Count`, `IsEmpty`, `ToArray`, `Keys`, `Values`, `Clear`, `CopyTo`) acquire all locks. The difference from one big lock is granularity: many small locks for writers and none for readers.
+</details>
+
+<details><summary>Why is a <code>ConcurrentDictionary</code> sweep slower even though it blocks no one?</summary>
+
+Each `TryRemove(pair)` takes a stripe lock, walks the chain, compares the value, and unlinks a node, where the old sweep took one lock for everything. The enumeration follows node pointers spread across the heap, where a `Dictionary` scans a contiguous array. That fits the timings, but the split between the causes was not profiled. A slower sweep on a background thread is a good trade if it removes the stall for readers.
+</details>
+
+<details><summary>Does <code>ToArray()</code> allocate a new block of memory, and can it run out of memory on a huge collection?</summary>
+
+Yes, it copies into a new array. Here that is 16 bytes per *expired* entry (one `KeyValuePair<string, LinkEntry>` is two references, and the strings and entries are not copied): measured 15.3 MB at 1M all expired and 76.3 MB at 5M, and only the expired entries are copied, so a sweep of mostly live data copies little. The store itself costs about 200 bytes per entry (199 MB for 1M, 977 MB for 5M), so the temporary array adds at most about 8% in the worst case, and the store runs out of memory long before the array does. The first sweep in a process allocated up to 2.5 times that (one-time LINQ warm-up, observed and not explained). An array over about 85,000 bytes (roughly 5,300 pairs) lands on the Large Object Heap, which only a gen2 collection reclaims; no gen2 GC happened in these runs, though each measurement started after a forced collection. An array can't exceed about 2.1 billion elements anyway.
+</details>
+
+<details><summary>How do you sweep a <code>Dictionary</code> without the temporary array?</summary>
+
+Remove while enumerating: `foreach (var e in d) if (expired) d.Remove(e.Key);`. Measured on a replica: 0 bytes allocated and about 2 times faster than `Where().ToArray()` then `Remove` (25 against 49 ms at 1M all expired; 165 against 275 ms at 5M). It did not throw on .NET 10. I recall that `Remove` was made safe during enumeration in .NET Core 3.0, but check the documentation before relying on it, since older .NET Framework versions throw `InvalidOperationException`. Keep it inside the same lock.
+</details>
+
+<details><summary>Why does a batch cap (<code>Where(...).Take(10_000).ToArray()</code>, repeated) make the sweep slower?</summary>
+
+Every batch restarts the enumeration from the beginning of the dictionary and walks past the slots already removed and the live entries, so the total work is O(n x batches). Measured: 91 ms against 49 ms at 1M all expired, 1.35 s against 275 ms at 5M all expired, and 1.5 s against 76 ms at 5M with 10% expired. The cap does bound the temporary array and the pause per call, but without a cursor (or an ordered structure such as a `PriorityQueue`) it multiplies the scan cost. The per-batch pause was not measured.
+</details>
+
+<details><summary>Is the first measurement in a process reliable?</summary>
+
+No. The same sweep allocated 29 MB on its first run and 15 MB on the second, and 188 MB against 76 MB at 5M, then matched the replica exactly. Warm up, repeat, and compare later runs, and when two supposedly identical measurements differ, resolve it before reporting either.
+</details>
+
+<details><summary>Can you remove entries from a <code>ConcurrentDictionary</code> while enumerating it?</summary>
+
+Yes: the enumerator is safe against concurrent modification. Use `TryRemove(pair)` (the overload that takes a <code>KeyValuePair</code>), which removes the entry only if it still holds that value, so a concurrent replacement isn't removed by mistake. The enumeration is not a snapshot, so a sweep may or may not see entries added after it started, which doesn't matter for a sweep.
+</details>
+
