@@ -900,3 +900,25 @@ Measured with 4 clients doing primary-key lookups for 12 s on a 1M-row table (on
 With the defaults (read from the server: `fsync`, `synchronous_commit`, `full_page_writes` and `autovacuum` all `on`), a committed row survived the kill and a row inside an open `BEGIN` did not (verified). A commit waits until its write-ahead-log record is on disk, so an acknowledged write is not lost, unlike Redis AOF `everysec` (about a second) or Redis snapshots (everything since the last one). At restart the log said `database system was not properly shut down; automatic recovery in progress`, then `redo starts` and `redo done` (under a millisecond here), then `ready to accept connections`. Postgres replays the log, which restores committed data not yet in the table files and discards uncommitted work. The `invalid record length ... got 0` line is, I believe, the normal end of the log, not an error (not verified). A statement with no `BEGIN` commits automatically when it finishes, so a lone `INSERT` is committed.
 </details>
 
+## 17. Contract tests for `IUrlStore`
+
+<details><summary>What is a contract test, and when is it worth writing?</summary>
+
+An abstract test class holds the behavior every implementation of an interface must share (`abstract IUrlStore CreateStore(TimeProvider clock)` plus the `[Fact]`s), and each implementation gets a thin subclass (`InMemoryStoreContractTests`) that supplies an instance. The same tests then run against every store. An interface only fixes signatures (`TryAddAsync` returns `ValueTask<bool>`), not the rules callers rely on: `false` means a collision, expired means missing, a past expiry is rejected, one of many concurrent adds wins. It pays off when a second implementation is coming, as with Postgres next to the in-memory store: the tests define the interface's behavior, not the first implementation's, and the second store has to prove it behaves the same. With only one implementation it is an ordinary test class plus a layer of indirection, so don't build it early. xUnit runs the `[Fact]`s of an abstract base through each concrete subclass (verified: one subclass gave one run per test, and the base added none).
+</details>
+
+<details><summary>What belongs in the contract and what doesn't?</summary>
+
+Only behavior every store must share: round trip, collision returns `false` and keeps the first value, expiry boundary, never-expiring entries, a past `ExpiresAt` rejected, exactly one winner under concurrency. Not in it: `Sweep` (`IExpirySweeper` is separate on purpose), and store-specific behavior such as Postgres vacuum, locks and migrations, which get their own tests. The rule has to be uniform because the stores disagree otherwise: Redis rejects `EX 0` (verified), the in-memory store accepted anything, and I believe Postgres accepts any `timestamptz` (not tested here). So each store gets the same guard, and the contract test pins it. The costs: tests must be store-independent (the clock is injected through `CreateStore(clock)`), and a database-backed subclass needs isolation per test and is slower.
+</details>
+
+<details><summary>How do you test that a rejected add leaves no trace, and why isn't <code>GetAsync</code> enough?</summary>
+
+A guard written after the insert (`TryAdd`, then `throw` for a past expiry) passes every "it throws" test but leaves a bad entry that occupies the code (an expired entry keeps its code until a sweep). `GetAsync("abc") == null` can't detect that, because reads treat an expired entry as missing, so it returns `null` either way. The test that works: add `abc` with a past expiry and expect `ArgumentOutOfRangeException`, then add `abc` with a valid expiry and assert `true`. With the bad entry stored, the second add returns `false`. Keep it a separate test with one past value (the guard is a single comparison), named for the outcome (`Code_can_be_added_after_rejected_past_expiry`), and mutate the guard (insert first, throw after) to confirm that it goes red. In Postgres the same mistake would burn the code with a row that was inserted and then rejected.
+</details>
+
+<details><summary>How do you name a test when you always struggle to?</summary>
+
+Say the rule, not the steps: finish "When ___, the store ___" and turn the sentence into a name in the style of the neighbouring tests (`Null_expiresAt_is_accepted`). Name the behavior, not the method (`Rejected_add_does_not_occupy_the_code`, not `TryAddAsync_throws_then_adds`). If the name needs "and", the test does two things. Read the name as a CI failure line: can someone understand the problem without opening the file? Keep mechanism out of the name (`Guard_runs_before_insert` breaks when the implementation changes). If you're stuck, write the body first and name it last, because the final assertion usually gives the name.
+</details>
+
