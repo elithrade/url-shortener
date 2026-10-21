@@ -162,7 +162,7 @@ Set `CodeLength` back to `7` afterwards.
 - **Expired means missing.** The check runs on every read (`now >= ExpiresAt`), so a link never redirects after its expiry, even before any cleanup. It returns `404`, the same as an unknown code, so a caller can't tell whether a code ever existed.
 - **Reads never delete.** An expired entry keeps occupying its code until a sweep removes it, so a code isn't reissued while stale links may still circulate. After a sweep the code can be reused. That is accepted for the in-memory store. At large scale the persistent store should use native TTL plus a never-reissue policy (see `PLAN.md`).
 - **Time is injected** (`TimeProvider`, registered as `TimeProvider.System`), so tests advance a `FakeTimeProvider` instead of sleeping.
-- **`IExpirySweeper` is a separate interface** implemented only by the in-memory store, because a database store would use native TTL. The in-memory store is registered once and both interfaces forward to that single instance.
+- **`IExpirySweeper` is a separate interface** implemented by the in-memory store today. A Postgres store will implement it too (Postgres has no native TTL), while a store with native TTL, such as Redis, would not need it. The in-memory store is registered once and both interfaces forward to that single instance.
 - **The sweep runs in a background service.** The host calls `ExecuteAsync` once, so the service owns the loop. A failed sweep is caught and logged inside the loop and the next tick still runs, and only a cancellation from shutdown ends the loop. The sweep is an O(n) scan that holds the store's lock, so concurrent reads wait for it (measured: about 11 ms per million entries when nothing expires, and about 46 ms when everything does).
 
 ## Roadmap

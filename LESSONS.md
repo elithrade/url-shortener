@@ -546,7 +546,7 @@ The expected number of reissued old codes is about `old x new / 3.5 trillion`: a
 
 <details><summary>Why a separate <code>IExpirySweeper</code> and not a method on <code>IUrlStore</code>?</summary>
 
-Only the in-memory store needs it: a database store uses native TTL. A separate small interface keeps `IUrlStore` lean, and the sweeper and hosted service are registered next to the in-memory store, so they go away with it. Name it for the capability (`IExpirySweeper`), because "Async" is a method suffix by convention, not part of an interface name. Make `Sweep()` synchronous: it is CPU work under a lock, and an async signature over synchronous work is a small lie. Returning the count makes it testable and loggable.
+When written, only the in-memory store implemented it, on the assumption that a database store would use native TTL. Postgres has no native TTL, so once it was chosen its store needs a sweep too (a store with native TTL, such as Redis, would not). A separate small interface keeps `IUrlStore` lean, and it lets each store decide whether it has anything to sweep. Name it for the capability (`IExpirySweeper`), because "Async" is a method suffix by convention, not part of an interface name. Make `Sweep()` synchronous: it is CPU work under a lock, and an async signature over synchronous work is a small lie. Returning the count makes it testable and loggable.
 </details>
 
 <details><summary>One class implements <code>IUrlStore</code> and <code>IExpirySweeper</code>. Why not two <code>AddSingleton&lt;I, Impl&gt;()</code> lines?</summary>
@@ -770,5 +770,89 @@ CA2254: the message template must not vary between calls, so `LogInformation($"{
 <details><summary>What is the idiomatic fix for those logging rules?</summary>
 
 `[LoggerMessage]` source-generated methods: make the class `partial`, declare `[LoggerMessage(Level = LogLevel.Information, Message = "Swept {Count} entries")] private partial void LogSwept(int count);`, and call it. The generator validates the template at compile time and checks `IsEnabled` before formatting, which clears CA1848, CA1873, CA2253 and CA2254 together. An `Exception` parameter is passed to the logger as the exception, so the message needs no placeholder for it. It also compiled once the explicit `_logger` field was removed and only the primary-constructor parameter `logger` remained, so the generator accepts that (I had said it needed the field). For a log line that runs once a minute, silencing CA1873 in `.editorconfig` would also have been defensible.
+</details>
+
+## 15. Redis: commands, expiry, persistence, memory and eviction
+
+Hands-on lab in a `redis:7` container. Items marked "docs" or "from memory" were not tested here.
+
+<details><summary>What does <code>SET a 1 NX EX 30</code> do, and how does it map to <code>TryAddAsync</code>?</summary>
+
+`NX` means "only if the key does not exist" and `EX 30` is a 30-second TTL (`PX` is the same in milliseconds). It replies `OK` when the key was created (`true`) and `(nil)` when the key existed (`false`, a collision), and the check, the write and the expiry are one atomic command, so `GET` then `SET` is never needed. A failed `NX` leaves the old value and its TTL untouched (verified: `SET d 1 EX 100`, `SET d 2 NX` gave `(nil)`, and `GET d` still returned `"1"`). `XX` is the opposite (only if it already exists).
+</details>
+
+<details><summary>What do <code>TTL</code> -1 and -2 mean?</summary>
+
+-1: the key exists and has no expiry (a never-expiring link). -2: no such key. An expired key and a never-created key look the same to a client (`GET` gives `nil`, `TTL` gives -2), which matches "expired means missing".
+</details>
+
+<details><summary>You overwrite an expiring key with a plain <code>SET c 2</code>. What happens to the TTL, and why does it matter?</summary>
+
+It is discarded (verified: `TTL c` returned -1). A code path that overwrites an expiring link would silently make it permanent, with no error. So the store should only write with `NX` (we have no update path), and a real overwrite needs `KEEPTTL` (from memory, not tested here).
+</details>
+
+<details><summary>What do <code>EX 0</code> and <code>PX -5</code> do, and what does that say about <code>TryAddAsync</code> with a past <code>ExpiresAt</code>?</summary>
+
+Both are errors (`ERR invalid expire time in 'set' command`, verified), not a silent no-op. A past or zero TTL can't be stored, so the contract should say `ExpiresAt` must be in the future and throw `ArgumentOutOfRangeException` otherwise: returning `false` would look like a collision (the endpoint would retry 5 times and answer 503), and returning `true` without storing would claim a link exists when it doesn't. Edge cases: `ExpiresAt == now` counts as past, and `PX` takes whole milliseconds, so under 1 ms remaining rounds to 0. `PX 1` returns `OK` but the key is gone before you can look.
+</details>
+
+<details><summary>How does Redis remove expired keys, and does <code>GetAsync</code> need its own <code>now &gt;= ExpiresAt</code> check?</summary>
+
+Two ways (docs): passive (a key is checked when it is accessed, and an expired one is treated as missing) and active (periodically Redis samples some keys that have a TTL and deletes the expired ones). Verified here: 1,000 keys with a 500 ms TTL that nobody read were gone within 3 s, so the active part works. The passive part is what guarantees a read never returns an expired key, so no read-time check is needed. Because the active part is sampling, an expired key can sit in memory a while, but it can't be seen.
+</details>
+
+<details><summary>Why did <code>PTTL e</code> return -2 on the first call after <code>SET e 1 PX 1500</code>?</summary>
+
+Typing the second command in an interactive shell took longer than 1.5 s, so the key had already expired. Script short-lived experiments (`docker exec redis-lab sh -c '...; sleep 0.5; ...'`) so that typing speed isn't part of the test.
+</details>
+
+<details><summary>You killed a Redis container, restarted it, and the key was gone. Why was that test meaningless?</summary>
+
+`docker run --rm` with no volume deletes the container and its filesystem when it exits, so the "restart" created a brand-new empty Redis. To test Redis's persistence the data directory must be outside the container: `-v redis-lab-data:/data` (the image writes `dump.rdb` and the AOF files in `/data`), and no `--rm`. In deployment, `/data` needs a volume too.
+</details>
+
+<details><summary>With Redis's default persistence, what survives <code>docker kill</code> and what survives <code>docker stop</code>?</summary>
+
+The defaults (read from the server) were `save 3600 1 300 100 60 10000` (a snapshot after 1 change in an hour, 100 in 5 minutes, or 10,000 in a minute) and `appendonly no`. `docker kill` (SIGKILL) gives Redis no chance to run code, so everything since the last snapshot was lost (a `SET` acknowledged with `OK` a few minutes earlier was gone). `docker stop` (SIGTERM, then SIGKILL after 10 s) made Redis write a final `dump.rdb`, and the key survived. The volume only stores what Redis writes, and it doesn't make Redis write.
+</details>
+
+<details><summary>What does AOF (<code>--appendonly yes</code>) change, and what can <code>appendfsync everysec</code> still lose?</summary>
+
+Redis logs every write command (Redis 7 keeps a directory `appendonlydir` with a base file, an incremental log and a manifest). A `SET` acknowledged before `docker kill` was still there after the restart. `appendfsync` defaults to `everysec` (verified): the log is flushed to disk about once a second, so a machine crash or power loss can lose about the last second of acknowledged writes (docs may say up to 2 seconds if an fsync is slow, check). I believe a killed Redis process loses nothing that it had already handed to the OS, which fits the result but isn't proven here. You lose the newest writes, and the log stays ordered, so it's loss, not corruption. `always` fsyncs every write (nearly nothing lost, slower), and `no` leaves it to the OS.
+</details>
+
+<details><summary>Does replication make <code>fsync</code> faster?</summary>
+
+No. They protect against different failures. `appendfsync` bounds what one machine loses if its process or OS dies. A replica keeps a copy on another machine, which helps when the disk or host is gone, but replication is asynchronous by default, so a replica can lag and lose the last writes at failover.
+</details>
+
+<details><summary>You start Redis with <code>--appendonly yes</code> on a volume that already has a <code>dump.rdb</code>. What happens to the data in it?</summary>
+
+It isn't loaded. Verified: after `SET old yes`, `docker stop`, then a new container with AOF on the same volume, `GET old` returned `nil`, although `dump.rdb` (103 bytes, written at the stop) was still in `/data`. With AOF enabled Redis loads the AOF (a fresh, empty one) and ignores the RDB. There is no error. So choose the persistence mode before real data exists. Enabling AOF on a running instance with `CONFIG SET appendonly yes` should build it from the current dataset (from memory, not tested here).
+</details>
+
+<details><summary>How do you measure memory per key, and what did 100,000 links cost?</summary>
+
+(`used_memory` after minus `used_memory` before) divided by the key count, where "before" is read from a fresh Redis (an empty one already uses about 1 MB). Result for a 7-character key, a 40-character value and a 30-day TTL: (15,958,344 − 987,000) / 100,000 = **149.7 bytes per key**, about three times the 47 bytes of payload. `MEMORY USAGE k000001` said 104, so it doesn't count everything (the expiry table entry is part of the gap, my guess). The .NET store measured about 200 bytes per entry, so they are the same order. At 1 billion keys that is about 150 GB before replicas, longer URLs and fork headroom, and about 1.5 GB at 10 million.
+</details>
+
+<details><summary>What does a TTL cost per key in Redis?</summary>
+
+About 24 bytes more per key (100,000 keys: about 2.4 MB more than the same keys without `EX`), around 16% of the per-key cost. My guess is the separate table of expiries (not verified). We keep it, because every link expires and Redis then deletes expired keys by itself.
+</details>
+
+<details><summary>Redis hits <code>maxmemory</code>. Does it write the extra data to disk, like an OS pagefile?</summary>
+
+No. Everything lives in RAM, and the RDB and AOF files are only for recovery after a restart. At the limit, `maxmemory-policy` decides. Verified with `maxmemory 3mb` and 100,000 `SET`s: with the default `noeviction`, 13,584 succeeded and 86,416 failed with `OOM command not allowed when used memory > 'maxmemory'` (reads kept working); with `allkeys-lru`, all 100,000 returned `OK`, `DBSIZE` ended at 13,464, and the first key was gone, so about 86,500 keys had been deleted silently, after clients were told `OK`. With no limit (the default is 0), Redis grows until the OS kills it.
+</details>
+
+<details><summary>Which eviction policy fits a store, and which fits a cache?</summary>
+
+A store wants `noeviction`: a refused write is a loud error you can map to 503, while eviction deletes links people were given. A cache wants an eviction policy such as `allkeys-lru`, because evicting is the point and a lost entry costs only a re-read from the source of truth. The same Redis behaves very differently depending on this one setting, and a managed Redis may default to eviction, so check it. Note that every one of our keys has a TTL, so the `volatile-*` policies would act like `allkeys-*` for us.
+</details>
+
+<details><summary>Why did we choose Postgres as the store and Redis as a cache in front of it?</summary>
+
+Redis is priced in RAM (about 150 GB per billion keys) and with AOF `everysec` can lose about a second of acknowledged writes, but the links are the data. Postgres keeps them on disk, commits through a write-ahead log, enforces uniqueness with a primary key, and can later hold users with real foreign keys. Redis then sits in front as a read-through cache of hot links (a few links get most of the clicks, so the cache stays small), where eviction or loss costs a re-read, not data. It's not "Redis can't be a store": at the right scale it can. Redis has native TTL, but Postgres doesn't, so the Postgres store still needs the sweeper. The `IUrlStore` interface is the seam that keeps both choices open.
 </details>
 
