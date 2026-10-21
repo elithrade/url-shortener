@@ -34,6 +34,7 @@ public sealed class InMemoryUrlStore(TimeProvider timeProvider) : IUrlStore, IEx
         // removes every expired entry, returns how many it removed
         lock (_lock)
         {
+            // when ExpiresAt is null, never expires now >= null is false
             var expiredEnties = _store.Where(e => now >= e.Value.ExpiresAt).ToArray();
             foreach (var expiredEntry in expiredEnties)
             {
@@ -50,6 +51,16 @@ public sealed class InMemoryUrlStore(TimeProvider timeProvider) : IUrlStore, IEx
     public ValueTask<bool> TryAddAsync(string code, LinkEntry linkEntry, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+
+        var now = _clock.GetUtcNow();
+
+        if (linkEntry.ExpiresAt <= now)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(linkEntry),
+                "ExpiresAt must be in the future"
+            );
+        }
 
         bool added;
         lock (_lock)
