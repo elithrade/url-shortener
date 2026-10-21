@@ -856,3 +856,47 @@ A store wants `noeviction`: a refused write is a loud error you can map to 503, 
 Redis is priced in RAM (about 150 GB per billion keys) and with AOF `everysec` can lose about a second of acknowledged writes, but the links are the data. Postgres keeps them on disk, commits through a write-ahead log, enforces uniqueness with a primary key, and can later hold users with real foreign keys. Redis then sits in front as a read-through cache of hot links (a few links get most of the clicks, so the cache stays small), where eviction or loss costs a re-read, not data. It's not "Redis can't be a store": at the right scale it can. Redis has native TTL, but Postgres doesn't, so the Postgres store still needs the sweeper. The `IUrlStore` interface is the seam that keeps both choices open.
 </details>
 
+## 16. Postgres: atomic insert, concurrency, dead tuples, locks and durability
+
+Hands-on lab in a `postgres:17` container. Items marked "from memory" or "believed" were not tested here.
+
+<details><summary>What does <code>INSERT ... ON CONFLICT DO NOTHING</code> return on a collision, and how does it map to <code>TryAddAsync</code>?</summary>
+
+The command tag reports rows affected: `INSERT 0 1` for a new code, `INSERT 0 0` for a collision (the first number is a legacy object id, always 0). In .NET that is the return value of `ExecuteNonQuery` or EF's `ExecuteSql`: 1 is `true`, 0 is `false`, with no exception. The plain `INSERT` of an existing key throws instead (`duplicate key value violates unique constraint "links_pkey"`, SQLSTATE `23505`), which you would catch and map to `false`. That is control flow by exception, slower and noisier, and the message contains the constraint name and the key, so it must never reach an API response. This is the design choice between EF `Add` plus `SaveChanges` (exception path) and raw SQL (row count).
+</details>
+
+<details><summary>50 connections insert the same code at once. What happens, and why does the code need no lock?</summary>
+
+Exactly one `INSERT 0 1` and 49 `INSERT 0 0` (verified), one row stored, with the winner arbitrary (`u3`). With the plain insert: 1 success and 49 unique-violation errors. The primary key's unique index decides, inside the database. Caveat: 50 `docker exec` processes don't start at the same instant, so one clean run is evidence, not proof (our unlocked in-memory test also failed only 1 run of 30).
+</details>
+
+<details><summary>Session A has inserted a key in an open transaction. What does session B do when it inserts the same key, and why?</summary>
+
+B hangs (verified). B can't yet know what its insert means: if A commits, B has a collision, and if A rolls back, the key never existed. So B waits for A's transaction to end. In `pg_stat_activity` B is `active` with `wait_event_type = Lock` and `wait_event = transactionid`, and A is `idle in transaction` with `wait_event = ClientRead` (waiting for the client's next command). Verified results: after A's `COMMIT`, B printed `INSERT 0 0`; after A's `ROLLBACK`, B printed `INSERT 0 1`. `pg_blocking_pids(pid)` shows who is blocking whom. A transaction holds all the keys it has inserted, and `pg_stat_activity` shows only its last statement. In an app, a request that opens a transaction and then waits on something slow makes others creating the same code hang, so keep transactions short.
+</details>
+
+<details><summary>You <code>DELETE</code> 500,000 of 1,000,000 rows. Why does the table stay the same size, and what is a dead tuple?</summary>
+
+Verified: the delete took 199 ms on an idle server, and the table stayed 73 MB (110 MB with indexes), `n_dead_tup` was 500,000, `n_live_tup` 500,000, and `count(*)` 500,000. Postgres never overwrites a row in place. A delete ends the row version, and sessions with older snapshots may still need to see it, so the old version stays in the file as a **dead tuple** until vacuum frees its space. Queries don't see dead tuples. Compare the in-memory store, where the memory is freed at once.
+</details>
+
+<details><summary>What does a plain <code>VACUUM</code> do with that space, and what is <code>VACUUM FULL</code>?</summary>
+
+Plain `VACUUM` makes the space reusable inside the file and does **not** shrink it (verified: still 73 MB; inserting 500,000 new rows left the table at 73 MB, with no growth, while the indexes grew, 110 to 125 MB in total). So a table's size follows its peak row count, and later inserts reuse the space as long as vacuum keeps up. Autovacuum runs in the background by default (verified: `n_dead_tup` was already 0 when I ran `VACUUM`, which took 4 ms). `VACUUM FULL` rewrites the table to give disk space back (verified: about 1.6 s here, the indexes shrank to 110 MB in total) and needs an exclusive lock on the table while it runs.
+</details>
+
+<details><summary>Session B holds an open read transaction, and <code>VACUUM FULL</code> is started. Does a plain read that starts afterwards wait?</summary>
+
+Yes, and it is not B that blocks it (verified): a read started before `VACUUM FULL` returned in about 190 ms, since reads don't block reads. `VACUUM FULL` waited for B's read lock until B committed (about 5 s). A read started while `VACUUM FULL` was waiting queued behind it and took about 4.8 s, finishing 11 ms after `VACUUM FULL` did. `pg_blocking_pids` showed the chain: the read was blocked by `VACUUM FULL`, which was blocked by B. Postgres queues later requests behind a waiting exclusive lock, so one `idle in transaction` session plus one command that needs an exclusive table lock can stall every read. I expect schema-changing migrations to behave the same way (inferred from the lock mechanism, to verify before our first deploy).
+</details>
+
+<details><summary>Is a reader blocked while the sweeper deletes 500,000 expired rows, and should the delete be batched?</summary>
+
+Measured with 4 clients doing primary-key lookups for 12 s on a 1M-row table (one run per scenario): baseline 374,078 reads, average 0.128 ms, worst 4.9 ms. During one `DELETE` of 500,000 rows (380 ms with readers running): 366,782 reads, average 0.131 ms, worst 6.1 ms, 3 reads over 5 ms. During 50 batches of 10,000: 381,221 reads, worst 3.9 ms, but the delete took 4,255 ms in total, about 11 times longer. So readers aren't blocked (readers see the old row versions, unlike the in-memory lock where a read waited for the whole sweep), and batching only costs time at this size. Decision: one `DELETE` per sweep, no batch cap. Why batching is slower is not investigated (a guess: each batch finds its rows again and commits separately). Not covered: scans by `expires_at`, concurrent inserts, replication and write-ahead-log volume, tables 100 times larger.
+</details>
+
+<details><summary>What does Postgres lose on <code>docker kill</code>, compared with Redis?</summary>
+
+With the defaults (read from the server: `fsync`, `synchronous_commit`, `full_page_writes` and `autovacuum` all `on`), a committed row survived the kill and a row inside an open `BEGIN` did not (verified). A commit waits until its write-ahead-log record is on disk, so an acknowledged write is not lost, unlike Redis AOF `everysec` (about a second) or Redis snapshots (everything since the last one). At restart the log said `database system was not properly shut down; automatic recovery in progress`, then `redo starts` and `redo done` (under a millisecond here), then `ready to accept connections`. Postgres replays the log, which restores committed data not yet in the table files and discards uncommitted work. The `invalid record length ... got 0` line is, I believe, the normal end of the log, not an error (not verified). A statement with no `BEGIN` commits automatically when it finishes, so a lone `INSERT` is committed.
+</details>
+
