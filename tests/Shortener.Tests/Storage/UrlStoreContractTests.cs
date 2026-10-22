@@ -132,6 +132,51 @@ public abstract class UrlStoreContractTests
     }
 
     [Fact]
+    public async Task Expiry_with_a_non_utc_offset_is_accepted()
+    {
+        var (store, _, now) = Create();
+        var expiresAt = now.AddHours(1).ToOffset(TimeSpan.FromHours(8));
+
+        // same instant as now + 1 hour, written with a +08:00 offset
+        Assert.Equal(now.AddHours(1), expiresAt);
+        Assert.Equal(TimeSpan.FromHours(8), expiresAt.Offset);
+
+        Assert.True(
+            await store.TryAddAsync(
+                "abc",
+                new LinkEntry("https://example.com/", expiresAt),
+                CancellationToken.None
+            )
+        );
+    }
+
+    [Theory]
+    [InlineData(3_599_999, true)] // 1 ms before the instant
+    [InlineData(3_600_000, false)] // exactly at the instant
+    public async Task Link_with_a_non_utc_expiry_is_alive_until_that_instant(
+        int advanceMilliseconds,
+        bool expectedAlive
+    )
+    {
+        var (store, clock, now) = Create();
+        var expiresAt = now.AddHours(1).ToOffset(TimeSpan.FromHours(8));
+        Assert.Equal(TimeSpan.FromHours(8), expiresAt.Offset);
+
+        Assert.True(
+            await store.TryAddAsync(
+                "abc",
+                new LinkEntry("https://example.com/", expiresAt),
+                CancellationToken.None
+            )
+        );
+
+        clock.Advance(TimeSpan.FromMilliseconds(advanceMilliseconds));
+
+        var url = await store.GetAsync("abc", CancellationToken.None);
+        Assert.Equal(expectedAlive, url != null);
+    }
+
+    [Fact]
     public async Task Never_expiring_link_is_still_readable_after_a_year()
     {
         var (store, clock, _) = Create();
@@ -204,6 +249,34 @@ public abstract class UrlStoreContractTests
 
         var winner = results.IndexOf(true);
         Assert.Equal(baseUrl + winner, await store.GetAsync("same", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Case_sensitive_code_treated_as_different_entries()
+    {
+        var (store, _, now) = Create();
+
+        Assert.True(
+            await store.TryAddAsync(
+                "abc",
+                new LinkEntry("https://example.com/1", now.AddHours(1)),
+                CancellationToken.None
+            )
+        );
+
+        Assert.True(
+            await store.TryAddAsync(
+                "aBc",
+                new LinkEntry("https://example.com/2", now.AddHours(1)),
+                CancellationToken.None
+            )
+        );
+
+        var url = await store.GetAsync("abc", CancellationToken.None);
+        Assert.Equal("https://example.com/1", url);
+
+        url = await store.GetAsync("aBc", CancellationToken.None);
+        Assert.Equal("https://example.com/2", url);
     }
 
     private (IUrlStore Store, FakeTimeProvider Clock, DateTimeOffset Now) Create()
