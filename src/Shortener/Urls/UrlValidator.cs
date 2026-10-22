@@ -34,6 +34,12 @@ public static class UrlValidator
             return false;
         }
 
+        if (parsedUrl.AbsoluteUri.Length > MAX_LENGTH)
+        {
+            error = $"Encoded url length is too long, maximum length is {MAX_LENGTH}";
+            return false;
+        }
+
         if (parsedUrl.Scheme != "http" && parsedUrl.Scheme != "https")
         {
             error = "Invalid url scheme, only http or https allowed";

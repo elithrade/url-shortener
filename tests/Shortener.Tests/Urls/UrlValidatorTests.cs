@@ -107,6 +107,54 @@ public class UrlValidatorTests
         Assert.Null(error);
     }
 
+    [Fact]
+    public void Canonical_form_length_over_the_limit_is_rejected()
+    {
+        const string baseUrl = "https://example.com/";
+        // é becomes %C3%A9 after encoding
+        var rest = new string('é', 400);
+
+        // the total length is 20 + 6 * 400 = 2420
+        Assert.False(Validate(baseUrl + rest, out var uri, out var error));
+        Assert.Null(uri);
+        Assert.NotNull(error);
+        Assert.Contains("Encoded url length is too long", error);
+    }
+
+    [Fact]
+    public void Canonical_form_at_max_length_is_accepted()
+    {
+        const string baseUrl = "https://example.com/";
+        // é becomes %C3%A9
+        var part1 = new string('é', 300);
+        var part2 = new string('a', 228);
+
+        // the total length is 20 + 6 * 300 + 228 = 2048
+        Assert.True(Validate(baseUrl + part1 + part2, out var uri, out var error));
+        Assert.NotNull(uri);
+        Assert.Equal(2048, uri.AbsoluteUri.Length);
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public void Canonical_form_one_over_max_length_is_rejected()
+    {
+        const string baseUrl = "https://example.com/";
+        // é becomes %C3%A9
+        var part1 = new string('é', 300);
+        var part2 = new string('a', 229);
+        var input = baseUrl + part1 + part2;
+
+        var uriInputLength = new Uri(input).AbsoluteUri.Length;
+        Assert.Equal(2049, uriInputLength);
+
+        // the total length is 20 + 6 * 300 + 229 = 2049
+        Assert.False(Validate(input, out var uri, out var error));
+        Assert.Null(uri);
+        Assert.NotNull(error);
+        Assert.Contains("Encoded url length is too long", error);
+    }
+
     [Theory]
     [InlineData(2049)]
     [InlineData(3000)]
@@ -128,7 +176,10 @@ public class UrlValidatorTests
     [InlineData("http://example.com:8080/a", "http://example.com:8080/a")] // non-default port kept
     [InlineData("https://example.com/a/B?Token=AbC#Frag", "https://example.com/a/B?Token=AbC#Frag")] // path/query/fragment case untouched
     [InlineData("http://sub.example.co.uk/a%20b", "http://sub.example.co.uk/a%20b")]
-    public void Accepts_valid_urls_and_returns_canonical_uri(string input, string expectedAbsoluteUri)
+    public void Accepts_valid_urls_and_returns_canonical_uri(
+        string input,
+        string expectedAbsoluteUri
+    )
     {
         Assert.True(Validate(input, out var uri, out var error));
         Assert.NotNull(uri);
