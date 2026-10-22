@@ -922,3 +922,82 @@ A guard written after the insert (`TryAdd`, then `throw` for a past expiry) pass
 Say the rule, not the steps: finish "When ___, the store ___" and turn the sentence into a name in the style of the neighbouring tests (`Null_expiresAt_is_accepted`). Name the behavior, not the method (`Rejected_add_does_not_occupy_the_code`, not `TryAddAsync_throws_then_adds`). If the name needs "and", the test does two things. Read the name as a CI failure line: can someone understand the problem without opening the file? Keep mechanism out of the name (`Guard_runs_before_insert` breaks when the implementation changes). If you're stuck, write the body first and name it last, because the final assertion usually gives the name.
 </details>
 
+<details><summary>How does xUnit create the fixture and the test class, and is it dependency injection?</summary>
+
+It isn't the DI container: xUnit has its own matching. Verified with a probe (a fixture, an abstract base with two tests, a subclass): the fixture is constructed once and `InitializeAsync` runs once, before any test (for us: the Testcontainers container starts here, about 7.6 s); then for **every test** xUnit creates a **new instance of the test class**, passes the *same* fixture to its constructor (matched by parameter type, from `IClassFixture<T>` in the base list), and runs the class's own `InitializeAsync`, the test, and `DisposeAsync`. The fixture is disposed after the last test. So the container belongs in the fixture, and the per-test reset (`TRUNCATE`) belongs in the test class's `InitializeAsync` (`IAsyncLifetime`, which returns `Task` in xUnit 2.9.3). Only xUnit's own set of things can be injected this way (fixtures, `ITestOutputHelper`), so the clock arrives as a method parameter (`CreateStore(clock)`). The `ServiceCollection` inside our fixture is a separate real DI container, used so tests build the context factory the same way production will.
+</details>
+
+<details><summary>How should a database test reset its data between tests, and what does "a new table per test" cost?</summary>
+
+Measured on a Testcontainers Postgres (20 repetitions, rough): `TRUNCATE TABLE` 3 ms, drop and recreate the table 2 ms, `EnsureDeleted` + `EnsureCreated` (a fresh database) 40 ms per test. All are small next to the container start. A unique table name per test does not work the obvious way: `CreateTablesAsync` failed with `relation "links" already exists`, which I believe is EF caching the model per `DbContext` type (not checked against the docs). `EnsureDeleted` also needs a named database, because it cannot drop the `postgres` maintenance database it connects through (`cannot drop the currently open database`). We use `TRUNCATE` in the test class's `InitializeAsync`. Tests in one class run one after another, so there is no race, but a second Postgres test class would start a second container unless the fixture is shared.
+</details>
+
+<details><summary>How good is a same-key race test at catching a missing lock?</summary>
+
+Poor. With the `lock` removed from `InMemoryUrlStore.TryAddAsync`, over 20 runs: the 50-task same-key contract test failed 4 times, the 1,000-task same-key test 0 times, and the distinct-keys stress test **20 of 20**. (My prediction that more tasks would catch it more often was wrong, and I don't know why.) So the same-key test states the behavior every store must have (exactly one winner), and the distinct-keys stress test is the real guard for the in-memory lock, which is why the heavy stress tests stay in `InMemoryStoreTests` and only a light same-key test is in the contract. In Postgres the same-key test guards something else: our wiring (the `23505` mapping, a fresh context per attempt).
+</details>
+
+## 18. EF Core and the Postgres store
+
+<details><summary>A <code>SaveChanges</code> fails with a duplicate key. Is the context back to its last good state, and can you reuse it?</summary>
+
+No (verified against Postgres): the database transaction rolls back, but the context keeps the failed entity tracked as `Added`. Reusing that context to save a different new code failed again with `23505`, and the new code was not stored. A context that has seen a failure is poisoned, so every attempt (including each retry of a collision) needs a fresh context.
+</details>
+
+<details><summary>The store is a singleton and <code>DbContext</code> is not thread-safe. Does the database's locking protect you, and do you need a <code>SemaphoreSlim</code>?</summary>
+
+The database protects the data, not the context object, which lives in your process (change tracker, connection). Verified: 20 concurrent saves on one shared context gave 1 `ok` and 19 `InvalidOperationException: A second operation was started on this context instance before a previous operation completed`, and 1 row stored. A `SemaphoreSlim` would "work" but serialize every request through one context and keep every entity it has seen in the change tracker, and a failed entity would still poison the next call. The pattern is `IDbContextFactory<T>` (`AddDbContextFactory`): the store creates one context per operation, `await using var db = await _factory.CreateDbContextAsync(ct)`. Verified with one context per call: 200 concurrent inserts of the same code gave 1 inserted and 199 `23505`, and 200 distinct codes gave 200 inserted. A scoped store was rejected because the singleton `ExpirySweepService` could not take it.
+</details>
+
+<details><summary>How do you catch a duplicate-key error, and what must not be caught?</summary>
+
+`catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })` (verified: the constant is `"23505"`, and the property pattern compiles because it is a constant). Verified with built exceptions: a unique violation is caught; a `22001` (value too long) is not; a `TimeoutException` is not. A filter means the exception is never caught when the condition is false, so the stack trace is intact. The rest propagates, because of the next card.
+</details>
+
+<details><summary>A method is called <code>TryAddAsync</code>. Should it catch every exception and return <code>false</code>?</summary>
+
+No. `Try...` returns `false` for the *expected* failure of that operation (like `int.TryParse`), not for any failure. Here `false` means exactly one thing: the code is taken, and the endpoint retries on it. Catching everything makes a database outage look like a collision (five slow retries, then a misleading 503), hides the cause, and can't be recovered from at this level. The store catches only `23505`, and the boundary (the endpoint or exception middleware) maps unexpected failures (a database error, a timeout) to 503 or 500 and logs once; catching, logging and rethrowing in every layer produces duplicate logs. I believe ASP.NET Core already logs unhandled exceptions from the pipeline, but I haven't checked what it writes. Document the rule on the interface.
+</details>
+
+<details><summary>Why do EF methods come in sync and async versions, and why is there no <code>await</code> on <code>db.Links.AsNoTracking()</code>?</summary>
+
+The async ones are for calls that do network I/O: the thread goes back to the pool while the database works, which avoids thread pool starvation when 200 requests all wait on Postgres. Query methods (`db.Links`, `AsNoTracking`, `Where`, `Select`) only *build* an `IQueryable` (deferred execution: no database call), so there is nothing to await; only the executing call at the end (`FirstOrDefaultAsync`, `ToListAsync`, `SaveChangesAsync`) sends SQL, and a query with no executing call never runs. `Add` only records the entity in the change tracker, so use `Add`, not `AddAsync` (I recall `AddAsync` exists for special value generators that query the database; not checked). `SaveChangesAsync` returns the number of changes written, but after one `Add` a failure throws instead of returning 0, so `await SaveChangesAsync(ct); return true;` is clearer than `!= 0`.
+</details>
+
+<details><summary>You wrote the read as <code>FindAsync</code>, or <code>Where(r =&gt; r.ExpiresAt &gt; now &amp;&amp; ...)</code>. What goes wrong?</summary>
+
+`FindAsync` returns the row by key and cannot apply the expiry rule, so you would load the whole row and test it in C#. Put the rule in the query: `.Where(r => r.Code == code)` and `.Where(r => r.ExpiresAt == null || r.ExpiresAt > now)` (chained `Where`s combine with `AND`, and avoid the precedence trap: `a || b && c` means `a || (b && c)`, which would match every never-expiring link regardless of the code). `r.ExpiresAt > now` alone never matches a null expiry, because in SQL `NULL > x` is unknown and `WHERE` keeps only true rows (verified: two tests failed). Read `now` into a local first, from the injected `TimeProvider` (EF sends it as a parameter, so the database clock is never used and `FakeTimeProvider` works). `string.Equals(x, StringComparison.OrdinalIgnoreCase)` cannot be translated (`The LINQ expression ... could not be translated`), and it would also be wrong: codes are case-sensitive. Use `r.Code == code`, and `Select(r => r.Url)` to fetch only that column.
+</details>
+
+<details><summary>Why does the Postgres store need <code>ToUniversalTime()</code> when the in-memory store does not?</summary>
+
+`DateTimeOffset` comparisons are about the instant, so the in-memory store handles any offset (12:00 UTC equals 20:00 +08:00). Npgsql refuses to write a non-UTC offset to `timestamptz` (verified): `ArgumentException: Cannot write DateTimeOffset with Offset=08:00:00 to PostgreSQL type 'timestamp with time zone', only offset 0 (UTC) is supported.` It surfaces as a `DbUpdateException` with the `ArgumentException` inside (I first said it was not a `DbUpdateException`, which was wrong), and our `23505` filter correctly ignores it. After `ToUniversalTime()` both rows read back as the same instant. It is an adaptation to a Postgres limitation, not a contract rule, but the interface promises any valid `DateTimeOffset`, so two contract tests (accepted, and alive until that instant with a `+08:00` expiry) pass in memory and failed in Postgres until the conversion was added. Use `?.` because a never-expiring link has a null expiry.
+</details>
+
+<details><summary>Which mutations did the Postgres store's contract tests catch, and which one survived?</summary>
+
+Six, each in a scratch copy. Remove the null clause: 2 failed. `>` to `>=` in the read: 2 failed (the exact-instant row, UTC and `+08:00`). Remove `SaveChangesAsync`: 6 failed (tests that only check `true` stay green, the round-trip ones catch it). Remove `ToUniversalTime()`: 3 failed. Guard `<=` to `<`: 1 failed. And `r.Code.ToLower() == code.ToLower()` (a case-insensitive lookup): **0 failed, it survived**, because no test read back two codes that differ only in case. The case-sensitivity test (add `abc` and `aBc`, read both back, each returns its own URL) fails against that mutation (`Expected .../2, Actual .../1`) and passes in both stores. A passing suite doesn't mean the behavior is covered: mutate the code to find what isn't.
+</details>
+
+<details><summary>Where does a type like <code>LinkEntry</code> belong when <code>LinkRecord</code> is under <code>Postgres/</code>?</summary>
+
+Next to its widest user. `LinkRecord` is the database row, used only by the Postgres store, so it lives in `Storage/Postgres/`. `LinkEntry` is in the `IUrlStore` signature, used by the interface, the endpoint and every store (the Postgres store maps `LinkRecord` to and from it), so it stays in `Storage/` next to `IUrlStore`. In `InMemory/` the interface would depend on a type in a folder named after one implementation.
+</details>
+
+<details><summary>Where does the connection string live, and why must the check not run unconditionally?</summary>
+
+In configuration, never in source: `builder.Configuration.GetConnectionString("Shortener")` (later sources win: `appsettings.json`, `appsettings.{Environment}.json`, user secrets in Development, environment variables such as `ConnectionStrings__Shortener`, then command-line arguments). Never log it or put it in an exception message. When I put a check ("connection string must be provided") at the top of `Program.cs`, **33 tests failed** at once, because every endpoint test boots the app through `WebApplicationFactory`, and `dotnet run` would fail for anyone without a database. The decision: a `Storage` setting (default `InMemory`), and only when it is `Postgres` read and check the connection string (`InvalidOperationException` naming the key, not the value), register the context factory and `PostgresUrlStore` with the `IUrlStore`/`IExpirySweeper` forwarding, and log which store was chosen, because forgetting the setting in production would otherwise silently run in memory.
+</details>
+
+<details><summary>Postgres or MySQL for this project?</summary>
+
+Both would work: an atomic insert-if-absent (`INSERT IGNORE` or a duplicate-key error in MySQL), durable commits, no native TTL in either, so the sweeper stays. We chose Postgres because we had verified its behavior (the insert race, vacuum, locks, crash recovery) and the Npgsql EF provider, not for a feature MySQL lacks. In the Stack Overflow Developer Survey 2025 (checked), PostgreSQL was used by 55.6% of respondents against 40.5% for MySQL (58.2% against 39.6% among professional developers), but the survey is self-selected and counts users, not installations, so MySQL's installed base (WordPress, legacy PHP) is larger than it suggests. From memory, not verified: InnoDB clusters rows by primary key, which random 7-character keys could make more expensive for inserts than Postgres's heap plus index.
+</details>
+
+## 19. URL validation: input length versus canonical length
+
+<details><summary>The validator limits the input to 2,048 characters, but the store keeps <code>AbsoluteUri</code>. Is that enough for a <code>varchar(2048)</code> column?</summary>
+
+No (verified): a URL with 2,000 `é` is 2,020 characters long, but its canonical form is **12,020** characters, because each `é` becomes `%C3%A9` (6 characters). `https://example.com/` plus 400 `é` is 420 characters of input and 20 + 6 × 400 = 2,420 canonical, so the input check passes and the column would reject it (I expect SQLSTATE `22001`, which our `23505` filter would not catch, so it would be a 500). The fix is a second check after parsing, `parsedUrl.AbsoluteUri.Length > MAX_LENGTH`, with its own message, and **the input check stays**: it is a cheap early reject that bounds the parse work, and the two are independent. The canonical form can also be shorter than the input (`http://example.com:80/a` becomes `http://example.com/a`). Tests: 420 characters in and 2,420 canonical is rejected (assert the message, so only the new check can have rejected it), exactly 2,048 canonical is accepted (assert `uri.AbsoluteUri.Length == 2048` so the setup proves itself), and 2,049 is rejected, so a loosened comparison fails one side or the other. In a bounded column, the length counts characters, and canonical output is ASCII, so characters equal bytes.
+</details>
+
