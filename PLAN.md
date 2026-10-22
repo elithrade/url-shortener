@@ -38,7 +38,7 @@ Legend: `[x]` done, `[ ]` to do.
 | 5 | Persistence (in progress) | A Postgres `IUrlStore` (EF Core with the Npgsql provider) replaces the in-memory one. Links survive a restart, acknowledged writes are durable, and the same contract tests run against both implementations. Uniqueness comes from a primary key on the code, and expiry from an `expires_at` column that reads check against the injected `TimeProvider`, with the existing sweeper deleting expired rows. Users and auth can later use the same database. Done: the Redis lab (see "Already done"), whose findings now feed the Line 2 cache. Left: see "Next up" |
 | 6 | Abuse protection | Rate limiting on `POST /shorten`, and a configured `BaseUrl` for the self-link check |
 | 7 | Config and ops | Settings in `IOptions<T>` and env vars, a `/health` endpoint, structured logging, graceful shutdown |
-| 8 | Ship it | Dockerfile, image built and pushed by CI, deployed to a host, post-deploy smoke test |
+| 8 | Ship it | Dockerfile, image built and pushed by CI, deployed to a host, post-deploy smoke test. **Decide first:** where to host and which Postgres to use (a managed service, which gives backups, or a container with a `/data` volume and scheduled `pg_dump` backups plus a tested restore). The connection string comes from configuration, and schema creation (`EnsureCreated` or migrations) must be decided here too |
 
 ### Schedule
 | Week | Dates | Focus |
