@@ -38,8 +38,8 @@ Most tests were mutation-checked: the code was deliberately broken in a scratch 
 ## Project layout
 ```
 Shortener.slnx
-src/Shortener/            the web app
-tests/Shortener.Tests/    unit and endpoint tests
+src/Shortener/            the web app: Program.cs, plus folders Api/, Expiry/, Storage/ (interfaces, InMemory/, and Postgres/ to come) and Urls/
+tests/Shortener.Tests/    unit and endpoint tests, in folders that mirror src
 .editorconfig             4-space indent (2 for project, yml and json files)
 PLAN.md                   roadmap and current milestone
 LESSONS.md                self-test flashcards

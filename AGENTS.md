@@ -8,8 +8,8 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It 
 ## Layout
 ```
 Shortener.slnx
-src/Shortener/            web app (Program.cs, IUrlStore, InMemoryUrlStore, UrlValidator, CodeGenerator)
-tests/Shortener.Tests/    unit tests and endpoint tests (xUnit, WebApplicationFactory)
+src/Shortener/            web app: Program.cs and folders Api/, Expiry/, Storage/ (IUrlStore, IExpirySweeper, LinkEntry, InMemory/), Urls/ (UrlValidator, CodeGenerator). All code stays in the single namespace `Shortener`
+tests/Shortener.Tests/    unit tests and endpoint tests (xUnit, WebApplicationFactory), in folders that mirror src. Namespace `Shortener.Tests`
 ```
 The test project has no `Program.cs` of its own. `WebApplicationFactory<Program>` reaches the app through the project reference.
 
