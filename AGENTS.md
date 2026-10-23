@@ -8,8 +8,8 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It 
 ## Layout
 ```
 Shortener.slnx
-src/Shortener/            web app: Program.cs and folders Api/, Expiry/, Storage/ (IUrlStore, IExpirySweeper, LinkEntry, InMemory/), Urls/ (UrlValidator, CodeGenerator). All code stays in the single namespace `Shortener`
-tests/Shortener.Tests/    unit tests and endpoint tests (xUnit, WebApplicationFactory), in folders that mirror src. Namespace `Shortener.Tests`
+src/Shortener/            web app: Program.cs and folders Api/, Expiry/, Storage/ (IUrlStore, IExpirySweeper, LinkEntry, InMemory/, Postgres/ with LinkRecord, ShortenerDbContext, PostgresUrlStore), Urls/ (UrlValidator, CodeGenerator). All code stays in the single namespace `Shortener`
+tests/Shortener.Tests/    unit tests and endpoint tests (xUnit, WebApplicationFactory), in folders that mirror src. Namespace `Shortener.Tests`. Store behavior lives in abstract contract classes (`UrlStoreContractTests`, `ExpirySweeperContractTests`) with an in-memory and a Postgres subclass each. The Postgres ones need Docker running (Testcontainers, one shared container via `[Collection("postgres")]`)
 ```
 The test project has no `Program.cs` of its own. `WebApplicationFactory<Program>` reaches the app through the project reference.
 
@@ -32,6 +32,9 @@ The test project has no `Program.cs` of its own. `WebApplicationFactory<Program>
 - Hand over boilerplate and plumbing (setup, config, scaffolding) directly to save time.
 - When reviewing, say what is wrong and why it matters. Don't rewrite the user's code unless they ask.
 - When you claim something about behavior, verify it. Run the code or the tests, and don't rely on memory.
+- The owner prefers test-first (red, then green) and mutation checks of important logic. Run mutations in a scratch copy under `/tmp` (copy the repo without `bin`, `obj` and `.git`), never in the working tree, and create the copy before editing it (not in the same parallel step). Remove scratch folders and containers afterwards.
+- The owner's AI credit is limited. Keep sessions short and replies concise, avoid large tool outputs and unnecessary experiments, and don't re-verify things already recorded as verified in `PLAN.md` or `LESSONS.md`.
+- Never write personal account, cloud subscription or tenant details into the repo or its docs.
 
 ## Code and test conventions
 - Nullable reference types are on. Prefer fixing the type or adding `[NotNullWhen]` over `!`.
@@ -41,6 +44,8 @@ The test project has no `Program.cs` of its own. `WebApplicationFactory<Program>
 - Endpoint tests use `AllowAutoRedirect = false`, assert the status before reading the body, and use unique URLs, because the in-memory store is shared within a test class.
 - A test should be able to fail. For logic that matters, temporarily break the code (for example `<=` instead of `<`) and confirm that a test goes red.
 - Use `WithWebHostBuilder(... ConfigureServices ...)` to substitute fakes such as `AlwaysCollidingStore`.
+- Supply settings that `Program.cs` reads at startup with `UseSetting`, not `ConfigureAppConfiguration` (the latter is ignored).
+- A database store's tests go in the shared contract classes, so every store proves the same behavior. A passing suite doesn't prove coverage: mutate the code to find what isn't tested.
 
 ## Do not
 - Add frameworks or dependencies without asking.
