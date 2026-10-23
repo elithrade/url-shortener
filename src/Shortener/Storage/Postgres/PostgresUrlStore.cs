@@ -6,7 +6,7 @@ namespace Shortener;
 public sealed class PostgresUrlStore(
     IDbContextFactory<ShortenerDbContext> factory,
     TimeProvider clock
-) : IUrlStore
+) : IUrlStore, IExpirySweeper
 {
     private readonly IDbContextFactory<ShortenerDbContext> _factory = factory;
     private readonly TimeProvider _clock = clock;
@@ -23,6 +23,16 @@ public sealed class PostgresUrlStore(
             .Where(r => r.ExpiresAt == null || r.ExpiresAt > now)
             .Select(r => r.Url)
             .FirstOrDefaultAsync(ct);
+    }
+
+    public async ValueTask<int> SweepAsync(CancellationToken ct)
+    {
+        var now = _clock.GetUtcNow();
+        await using var db = await _factory.CreateDbContextAsync(ct);
+
+        return await db
+            .Links.Where(r => r.ExpiresAt != null && r.ExpiresAt <= now)
+            .ExecuteDeleteAsync(ct);
     }
 
     public async ValueTask<bool> TryAddAsync(string code, LinkEntry linkEntry, CancellationToken ct)

@@ -5,7 +5,7 @@ public class PostgresStoreContractTests(PostgresFixture fixture)
         IClassFixture<PostgresFixture>,
         IAsyncLifetime
 {
-    public async Task DisposeAsync() { }
+    public Task DisposeAsync() => Task.CompletedTask;
 
     public async Task InitializeAsync()
     {
