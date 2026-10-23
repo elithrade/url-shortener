@@ -288,6 +288,58 @@ public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>
         Assert.Same(urlStore, expirySweeper);
     }
 
+    [Fact]
+    public void Default_should_resolve_InMemoryUrlStore()
+    {
+        var urlStore = _factory.Services.GetRequiredService<IUrlStore>();
+        var expirySweeper = _factory.Services.GetRequiredService<IExpirySweeper>();
+
+        Assert.IsType<InMemoryUrlStore>(urlStore);
+        Assert.IsType<InMemoryUrlStore>(expirySweeper);
+    }
+
+    [Theory]
+    [InlineData("Postgres   ")]
+    [InlineData("POSTGRES")]
+    [InlineData("Postgres")]
+    public void Postgres_storage_without_a_connection_string_fails_at_startup(string value)
+    {
+        using var factory = _factory.WithWebHostBuilder(b => b.UseSetting("Storage", value));
+
+        var ex = Assert.Throws<InvalidOperationException>(factory.CreateClient);
+
+        Assert.Contains("ConnectionStrings:Shortener", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("Postgress")]
+    [InlineData("abc")]
+    [InlineData("5")]
+    [InlineData("1")]
+    [InlineData("")]
+    public void Unknown_storage_type_fails_at_startup(string value)
+    {
+        using var factory = _factory.WithWebHostBuilder(b => b.UseSetting("Storage", value));
+
+        var ex = Assert.Throws<InvalidOperationException>(factory.CreateClient);
+
+        Assert.Contains("InMemory", ex.Message);
+        Assert.Contains("Postgres", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("InMemory")]
+    [InlineData("inmemory")]
+    [InlineData("INMEMORY")]
+    public void InMemory_in_any_case_selects_the_in_memory_store(string value)
+    {
+        using var factory = _factory.WithWebHostBuilder(b => b.UseSetting("Storage", value));
+
+        var store = factory.Services.GetRequiredService<IUrlStore>();
+
+        Assert.IsType<InMemoryUrlStore>(store);
+    }
+
     private (HttpClient, FakeTimeProvider) NewFakeTimerClient(DateTimeOffset now)
     {
         var clock = new FakeTimeProvider(now);

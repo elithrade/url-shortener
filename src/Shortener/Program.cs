@@ -2,12 +2,31 @@ using Shortener;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// register multiple interfaces with the same implementation
-builder.Services.AddSingleton<InMemoryUrlStore>();
-builder.Services.AddSingleton<IUrlStore>(sp => sp.GetRequiredService<InMemoryUrlStore>());
-builder.Services.AddSingleton<IExpirySweeper>(sp => sp.GetRequiredService<InMemoryUrlStore>());
-builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddHostedService<ExpirySweepService>();
+var storage = builder.Configuration["Storage"]?.Trim() ?? "InMemory";
+var allowed = new HashSet<string>(["InMemory", "Postgres"], StringComparer.OrdinalIgnoreCase);
+
+if (!allowed.Contains(storage))
+{
+    throw new InvalidOperationException($"Only {string.Join(", ", allowed)} are allowed");
+}
+
+if (storage.Equals("Postgres", StringComparison.OrdinalIgnoreCase))
+{
+    var connectionString = builder.Configuration.GetConnectionString("Shortener");
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        throw new InvalidOperationException("ConnectionStrings:Shortener is missing");
+    }
+}
+else
+{
+    // register multiple interfaces with the same implementation
+    builder.Services.AddSingleton<InMemoryUrlStore>();
+    builder.Services.AddSingleton<IUrlStore>(sp => sp.GetRequiredService<InMemoryUrlStore>());
+    builder.Services.AddSingleton<IExpirySweeper>(sp => sp.GetRequiredService<InMemoryUrlStore>());
+    builder.Services.AddSingleton(TimeProvider.System);
+    builder.Services.AddHostedService<ExpirySweepService>();
+}
 
 var app = builder.Build();
 
