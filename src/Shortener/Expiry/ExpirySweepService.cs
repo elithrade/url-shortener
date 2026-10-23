@@ -30,7 +30,7 @@ public sealed partial class ExpirySweepService(
             {
                 try
                 {
-                    var swept = _sweeper.Sweep();
+                    var swept = await _sweeper.SweepAsync(stoppingToken);
                     if (swept > 0)
                     {
                         LogSwept(swept);

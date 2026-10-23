@@ -99,14 +99,14 @@ public class InMemoryStoreTests
         // advance time by 2 hours
         clock.Advance(TimeSpan.FromHours(2));
 
-        int removed = store.Sweep();
+        int removed = await store.SweepAsync(CancellationToken.None);
 
         // 3 expired and 9 just expired
         Assert.Equal(12, removed);
 
         // the first sweep must really remove them: GetAsync alone would hide it,
         // because it already treats an expired entry as missing
-        Assert.Equal(0, store.Sweep());
+        Assert.Equal(0, await store.SweepAsync(CancellationToken.None));
 
         // getting expired should return null
         foreach (var (Code, _) in expired)
@@ -147,7 +147,7 @@ public class InMemoryStoreTests
 
         clock.Advance(TimeSpan.FromHours(2));
 
-        store.Sweep();
+        await store.SweepAsync(CancellationToken.None);
 
         // the store by design allows the same code be added again once its expired and swept away
         Assert.True(
@@ -160,7 +160,7 @@ public class InMemoryStoreTests
 
         clock.Advance(TimeSpan.FromMinutes(30));
         // not expired and not swept away
-        Assert.Equal(0, store.Sweep());
+        Assert.Equal(0, await store.SweepAsync(CancellationToken.None));
 
         Assert.Equal(
             "https://newexample.com/abc",

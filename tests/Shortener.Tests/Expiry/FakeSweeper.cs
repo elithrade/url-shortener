@@ -8,7 +8,7 @@ internal sealed class FakeSweeper : IExpirySweeper
 
     public int Calls;
 
-    public int Sweep()
+    public async ValueTask<int> SweepAsync(CancellationToken ct)
     {
         var call = Interlocked.Increment(ref Calls);
         _called.Release();

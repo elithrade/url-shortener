@@ -2,5 +2,5 @@ namespace Shortener;
 
 public interface IExpirySweeper
 {
-    int Sweep();
+    ValueTask<int> SweepAsync(CancellationToken ct);
 }

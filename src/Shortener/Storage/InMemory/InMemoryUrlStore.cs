@@ -26,8 +26,10 @@ public sealed class InMemoryUrlStore(TimeProvider timeProvider) : IUrlStore, IEx
         return ValueTask.FromResult<string?>(null);
     }
 
-    public int Sweep()
+    public ValueTask<int> SweepAsync(CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
+
         var now = _clock.GetUtcNow();
         var removedCount = 0;
 
@@ -45,7 +47,7 @@ public sealed class InMemoryUrlStore(TimeProvider timeProvider) : IUrlStore, IEx
             }
         }
 
-        return removedCount;
+        return ValueTask.FromResult(removedCount);
     }
 
     public ValueTask<bool> TryAddAsync(string code, LinkEntry linkEntry, CancellationToken ct)
