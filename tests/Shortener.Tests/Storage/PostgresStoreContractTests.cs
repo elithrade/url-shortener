@@ -1,8 +1,8 @@
 namespace Shortener.Tests;
 
+[Collection("postgres")]
 public class PostgresStoreContractTests(PostgresFixture fixture)
     : UrlStoreContractTests,
-        IClassFixture<PostgresFixture>,
         IAsyncLifetime
 {
     public Task DisposeAsync() => Task.CompletedTask;

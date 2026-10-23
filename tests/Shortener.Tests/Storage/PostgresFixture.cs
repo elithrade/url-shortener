@@ -14,6 +14,8 @@ public sealed class PostgresFixture : IAsyncLifetime
         _provider?.GetRequiredService<IDbContextFactory<ShortenerDbContext>>()
         ?? throw new InvalidOperationException("The fixture has not been initialized.");
 
+    public string ConnectionString => _container.GetConnectionString();
+
     public async Task InitializeAsync()
     {
         await _container.StartAsync();

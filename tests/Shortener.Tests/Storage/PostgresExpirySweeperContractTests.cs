@@ -1,8 +1,8 @@
 namespace Shortener.Tests;
 
+[Collection("postgres")]
 public class PostgresExpirySweeperContractTests(PostgresFixture fixture)
     : ExpirySweeperContractTests,
-        IClassFixture<PostgresFixture>,
         IAsyncLifetime
 {
     public Task DisposeAsync() => Task.CompletedTask;
