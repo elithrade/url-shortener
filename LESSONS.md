@@ -994,6 +994,31 @@ In configuration, never in source: `builder.Configuration.GetConnectionString("S
 Both would work: an atomic insert-if-absent (`INSERT IGNORE` or a duplicate-key error in MySQL), durable commits, no native TTL in either, so the sweeper stays. We chose Postgres because we had verified its behavior (the insert race, vacuum, locks, crash recovery) and the Npgsql EF provider, not for a feature MySQL lacks. In the Stack Overflow Developer Survey 2025 (checked), PostgreSQL was used by 55.6% of respondents against 40.5% for MySQL (58.2% against 39.6% among professional developers), but the survey is self-selected and counts users, not installations, so MySQL's installed base (WordPress, legacy PHP) is larger than it suggests. From memory, not verified: InnoDB clusters rows by primary key, which random 7-character keys could make more expensive for inserts than Postgres's heap plus index.
 </details>
 
+<details><summary>A <code>WebApplicationFactory</code> test calls an endpoint whose service is not registered and gets <code>500</code>, not an exception. Why?</summary>
+
+Verified. Dependency injection resolves lazily: building the host and calling `CreateClient()` both succeed, and the missing `IUrlStore` is only found when the first request binds the handler parameter. That `InvalidOperationException` is thrown inside the request pipeline. `WebApplicationFactory` runs in the `Development` environment by default (a scratch test printed `ENV=Development`), so the developer exception page catches it and writes a `500` whose body starts `System.InvalidOperationException: Failure to infer one or more parameters.` The exception never reaches the test. `factory.Services.GetRequiredService<T>()` is different: it resolves directly and throws inside the test (that is how the two registration tests failed). When a status is unexpected, read the body first.
+</details>
+
+<details><summary>The round-trip test passes against the fixture's database. Why does that not prove the app creates its own schema, and what does?</summary>
+
+The fixture already ran `EnsureCreatedAsync` on its database, so `links` exists before the app starts, and the test would pass even if `Program.cs` never created the schema. The test needs a database with no tables: `CREATE DATABASE "reg_<guid>"` in the same container, a connection string built with `NpgsqlConnectionStringBuilder { Database = name }`, and `DROP DATABASE ... WITH (FORCE)` when the test ends (pooled connections would otherwise block the drop, so clear the pools too). Declare `await using var db` before the factory, so the app shuts down before the drop, and don't forget the `await using`, or every run leaves a database behind. To prove the test can fail, fix `Program.cs` in two steps: register everything first (the registration tests go green and the round trip stays red with `relation "links" does not exist`), then add `EnsureCreatedAsync` (green).
+</details>
+
+<details><summary>Which assertion catches registering <code>PostgresUrlStore</code> as two separate singletons, and which does not?</summary>
+
+Verified by mutation in a scratch copy. With `AddSingleton<IUrlStore, PostgresUrlStore>()` and `AddSingleton<IExpirySweeper, PostgresUrlStore>()`, only the `Assert.Same(urlStore, expirySweeper)` test failed (`Values are not the same instance`). `Assert.IsType<PostgresUrlStore>` on each passed, because each interface did resolve to the right type, so it checks the type and not the identity. The consequence in production would be a sweeper that cleans a store nobody reads. In the same way, removing `AddHostedService<ExpirySweepService>()` made `Assert.Single(services.OfType<ExpirySweepService>())` fail with an empty collection.
+</details>
+
+<details><summary>A test class needs the shared Postgres container and its own <code>WebApplicationFactory&lt;Program&gt;</code>. How are both declared?</summary>
+
+Both arrive through the constructor, but each is declared differently. `[Collection("postgres")]` on the class (with `ICollectionFixture<PostgresFixture>` on a `[CollectionDefinition]` class) supplies `PostgresFixture`, created once for all classes in the collection, which then run one after another. The factory needs `IClassFixture<WebApplicationFactory<Program>>` on the class, created once per class, because a constructor parameter alone is not injected unless the fixture is declared. A new test class instance is created for every test, so `IAsyncLifetime` is only for async per-test setup and cleanup; it was removed here once nothing called `ResetAsync`. Each `WithWebHostBuilder` result builds its own host, so every test derives its own factory with its own settings and disposes it (`await using` in an async test, `using` in a sync one).
+</details>
+
+<details><summary>Is <code>EnsureCreatedAsync</code> at startup safe when several instances start at once?</summary>
+
+Not guaranteed. The existence check and the `CREATE TABLE` are separate steps, so two callers can both see "missing" and the second `CREATE TABLE` fails (the same check-then-act shape as the store race). Measured in a scratch copy, 30 runs each: 8 concurrent callers on an empty database failed in 6 of 30 runs, every error `42P07 relation "links" already exists`. Two `WebApplicationFactory` hosts starting together failed in 0 of 30, probably because host startup is much slower than the schema step (a guess), so the real-world window is small but not zero. Two clients from one factory would not test it, because a factory builds one host. The fix is to take schema creation out of startup: a deploy step (migration job or init container) that runs once before the instances start. Alternatives are to tolerate `42P07` or to take a Postgres advisory lock. Keep `EnsureCreatedAsync` for tests, local development and a single instance.
+</details>
+
 ## 19. URL validation: input length versus canonical length
 
 <details><summary>The validator limits the input to 2,048 characters, but the store keeps <code>AbsoluteUri</code>. Is that enough for a <code>varchar(2048)</code> column?</summary>

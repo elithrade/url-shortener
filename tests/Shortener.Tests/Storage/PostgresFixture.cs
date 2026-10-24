@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 using Testcontainers.PostgreSql;
 
 namespace Shortener.Tests;
@@ -36,6 +37,31 @@ public sealed class PostgresFixture : IAsyncLifetime
         await db.Database.ExecuteSqlRawAsync("TRUNCATE TABLE links");
     }
 
+    // A new database in the same container with no tables, so a test can prove the app creates its own schema.
+    public async Task<TemporaryDatabase> CreateEmptyDatabaseAsync()
+    {
+        var name = $"reg_{Guid.NewGuid():N}";
+        await ExecuteAsync($"CREATE DATABASE \"{name}\"");
+
+        var connectionString = new NpgsqlConnectionStringBuilder(ConnectionString)
+        {
+            Database = name,
+        }.ConnectionString;
+
+        return new TemporaryDatabase(
+            connectionString,
+            () => ExecuteAsync($"DROP DATABASE \"{name}\" WITH (FORCE)")
+        );
+    }
+
+    private async Task ExecuteAsync(string sql)
+    {
+        await using var connection = new NpgsqlConnection(ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync();
+    }
+
     public async Task DisposeAsync()
     {
         if (_provider is not null)
@@ -44,5 +70,16 @@ public sealed class PostgresFixture : IAsyncLifetime
         }
 
         await _container.DisposeAsync();
+    }
+}
+
+public sealed class TemporaryDatabase(string connectionString, Func<Task> drop) : IAsyncDisposable
+{
+    public string ConnectionString { get; } = connectionString;
+
+    public async ValueTask DisposeAsync()
+    {
+        NpgsqlConnection.ClearAllPools();
+        await drop();
     }
 }

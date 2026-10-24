@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using Shortener;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -6,17 +7,21 @@ var storage = builder.Configuration["Storage"]?.Trim() ?? "InMemory";
 var allowed = new HashSet<string>(["InMemory", "Postgres"], StringComparer.OrdinalIgnoreCase);
 
 if (!allowed.Contains(storage))
-{
     throw new InvalidOperationException($"Only {string.Join(", ", allowed)} are allowed");
-}
 
-if (storage.Equals("Postgres", StringComparison.OrdinalIgnoreCase))
+var usePostgres = storage.Equals("Postgres", StringComparison.OrdinalIgnoreCase);
+if (usePostgres)
 {
     var connectionString = builder.Configuration.GetConnectionString("Shortener");
     if (string.IsNullOrWhiteSpace(connectionString))
-    {
         throw new InvalidOperationException("ConnectionStrings:Shortener is missing");
-    }
+
+    builder.Services.AddDbContextFactory<ShortenerDbContext>(o => o.UseNpgsql(connectionString));
+    builder.Services.AddSingleton<PostgresUrlStore>();
+    // register multiple interfaces with the same implementation
+    builder.Services.AddSingleton<IUrlStore>(sp => sp.GetRequiredService<PostgresUrlStore>());
+    builder.Services.AddSingleton<IExpirySweeper>(sp => sp.GetRequiredService<PostgresUrlStore>());
+    builder.Services.AddSingleton(TimeProvider.System);
 }
 else
 {
@@ -25,10 +30,20 @@ else
     builder.Services.AddSingleton<IUrlStore>(sp => sp.GetRequiredService<InMemoryUrlStore>());
     builder.Services.AddSingleton<IExpirySweeper>(sp => sp.GetRequiredService<InMemoryUrlStore>());
     builder.Services.AddSingleton(TimeProvider.System);
-    builder.Services.AddHostedService<ExpirySweepService>();
 }
 
+builder.Services.AddHostedService<ExpirySweepService>();
+
 var app = builder.Build();
+StartupLog.UsingStorage(app.Logger, usePostgres ? "Postgres" : "InMemory");
+
+if (usePostgres)
+{
+    var dbFactory = app.Services.GetRequiredService<IDbContextFactory<ShortenerDbContext>>();
+    await using var db = await dbFactory.CreateDbContextAsync();
+
+    await db.Database.EnsureCreatedAsync();
+}
 
 const int MaxAttempts = 5;
 const int CodeLength = 7;
@@ -102,3 +117,9 @@ app.MapGet(
 );
 
 app.Run();
+
+internal static partial class StartupLog
+{
+    [LoggerMessage(Level = LogLevel.Information, Message = "Using {Storage} storage")]
+    public static partial void UsingStorage(ILogger logger, string storage);
+}
