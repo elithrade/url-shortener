@@ -1019,6 +1019,26 @@ Both arrive through the constructor, but each is declared differently. `[Collect
 Not guaranteed. The existence check and the `CREATE TABLE` are separate steps, so two callers can both see "missing" and the second `CREATE TABLE` fails (the same check-then-act shape as the store race). Measured in a scratch copy, 30 runs each: 8 concurrent callers on an empty database failed in 6 of 30 runs, every error `42P07 relation "links" already exists`. Two `WebApplicationFactory` hosts starting together failed in 0 of 30, probably because host startup is much slower than the schema step (a guess), so the real-world window is small but not zero. Two clients from one factory would not test it, because a factory builds one host. The fix is to take schema creation out of startup: a deploy step (migration job or init container) that runs once before the instances start. Alternatives are to tolerate `42P07` or to take a Postgres advisory lock. Keep `EnsureCreatedAsync` for tests, local development and a single instance.
 </details>
 
+<details><summary>The database is down. Which exception does <code>PostgresUrlStore</code> let escape, and why does <code>catch (NpgsqlException)</code> not work?</summary>
+
+Measured (scratch copy, one run per case, no retry strategy). A refused port, and reads and the sweep against a stopped container, throw `InvalidOperationException` ("An exception has been raised that is likely due to a transient failure.") wrapping `NpgsqlException` (`IsTransient=True`) wrapping `SocketException`. A write to a stopped container with a pooled connection open throws `InvalidOperationException` wrapping `DbUpdateException` wrapping `PostgresException` `57P01`. EF wraps a transient failure in an `InvalidOperationException`, so `NpgsqlException` is never the outermost type, and catching `InvalidOperationException` is too broad (a missing DI registration is one too, and must stay a 500). The filter walks the `InnerException` chain for an `NpgsqlException { IsTransient: true }`. A unique violation (`23505`) is not transient, so it is not wrapped, and the `DbUpdateException` catch in `TryAddAsync` still matches. Recheck if `EnableRetryOnFailure` is ever added. My first guess (a raw `NpgsqlException`) was wrong.
+</details>
+
+<details><summary>Who should translate a database failure into a 503, the store or the endpoint? Why?</summary>
+
+The store translates and the endpoint catches one type. Each store converts its provider's errors into `StorageUnavailableException` (message and inner exception), so the endpoint code doesn't mention Npgsql, and a store for another database adds its own translation without touching `Program.cs`. The store must not produce HTTP codes, because it knows nothing about HTTP. Keep the original exception as the inner exception for the logs, make the message a constant (no connection details), and log in the handler, otherwise an outage leaves no trace. An outage is not retried: the endpoint's loop exists for code collisions, and the `POST` test asserts `Attempts == 1`.
+</details>
+
+<details><summary>Why use a closed port (<code>Port=1</code>) in a test for an unavailable database, and what does the <code>3D000</code> test add?</summary>
+
+A refused connection gives an unreachable database with no Docker and without stopping the shared container (0 to about 470 ms per call). That tests the translation. The `3D000` test (a database name that does not exist, on the live container) covers the opposite: the server is up and answers with a real `PostgresException` that is not transient, so it must escape untranslated and stay a 500 (a wrong connection string is a deploy bug, and as a 503 it would look like a temporary outage). Without it, widening the filter to `when (true)` fails no test. The test asserts the exception exists, is not a `StorageUnavailableException`, and contains `3D000` in its chain, so the setup proves itself, and it covers all three methods because each has its own copy of the filter. Mutation: with `when (true)` all three tests failed.
+</details>
+
+<details><summary>A 500 test checks that the body does not contain the inner exception's message, and it fails. Why, and what should the test assert?</summary>
+
+`WebApplicationFactory` runs in Development, so an unhandled exception gets the developer exception page, which prints the exception, its inner exceptions and the stack trace (the failure showed `OperationException: secret:1234`). That is the framework's behavior, not the app's. The 500 tests assert only the status. The leak check belongs in the 503 tests, where the handler writes the response, and it is only meaningful if it can fail: returning `ex.InnerException?.Message` in the body made it fail. Put the secret in the inner exception's message (and the outer one) to cover both. In production, never run with the Development environment, or these messages reach clients.
+</details>
+
 ## 19. URL validation: input length versus canonical length
 
 <details><summary>The validator limits the input to 2,048 characters, but the store keeps <code>AbsoluteUri</code>. Is that enough for a <code>varchar(2048)</code> column?</summary>

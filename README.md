@@ -9,15 +9,24 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It'
 - URL validation (`UrlValidator`): absolute `http`/`https` only, at most 2048 characters, no embedded credentials, and no links back to the service's own host.
 - Expiry: every link expires. The client may send `expiresInSeconds` (60 to 31,536,000), and the default is 30 days. An expired link behaves exactly like an unknown one (`404`).
 - `GET /{code}` redirects to the stored URL with `302 Found`, or returns `404` if the code is unknown or expired.
-- In-memory store (`Dictionary` guarded by a `Lock`) behind an `IUrlStore` interface. Entries are `LinkEntry(Url, ExpiresAt)`, and the expiry is checked on every read against an injected `TimeProvider`.
+- Two stores behind the `IUrlStore` interface, chosen by the `Storage` setting: `InMemory` (the default; a `Dictionary` guarded by a `Lock`) and `Postgres` (EF Core with Npgsql, where uniqueness comes from the primary key on the code and links are kept in the database). Entries are `LinkEntry(Url, ExpiresAt)`, and the expiry is checked on every read against an injected `TimeProvider`.
 - Bounded retry on code collisions: up to 5 attempts, then `503`.
-- `InMemoryUrlStore` also implements `IExpirySweeper.Sweep()`, which removes expired entries and is tested. `ExpirySweepService` (a `BackgroundService` with a `PeriodicTimer`) calls it every 60 seconds, so expired entries are freed shortly after they expire (they are never served in the meantime, because reads check the expiry).
+- A storage outage returns `503` (not retried, and with no details in the response). Other unexpected errors stay `500`.
+- Both stores implement `IExpirySweeper.SweepAsync()`, which removes expired entries (the Postgres store with one `DELETE`) and is tested. `ExpirySweepService` (a `BackgroundService` with a `PeriodicTimer`) calls it every 60 seconds, so expired entries are freed shortly after they expire (they are never served in the meantime, because reads check the expiry).
 
 ## Run
 ```bash
 dotnet run --project src/Shortener
 ```
 The HTTP profile listens on `http://localhost:5154` (see `src/Shortener/Properties/launchSettings.json`).
+
+To use Postgres instead of the in-memory store, set `Storage` to `Postgres` and provide a connection string (never commit one). For example, with a throwaway container:
+```bash
+docker run -d --rm --name pg -e POSTGRES_PASSWORD=dev -p 5432:5432 postgres:17
+Storage=Postgres ConnectionStrings__Shortener="Host=localhost;Username=postgres;Password=dev;Database=postgres" \
+  dotnet run --project src/Shortener
+```
+The app creates the `links` table at startup (`EnsureCreatedAsync`), which is only safe for one instance: two instances starting together on an empty database can race (measured in `PLAN.md`). That container has no volume, so its data is lost when it stops.
 
 ## Tests
 ```bash
@@ -26,9 +35,11 @@ dotnet test
 - `UrlValidatorTests`: rejected input (empty, malformed, bad schemes, credentials, own host, length limit), the canonical form of accepted URLs, and the `TryValidate` contract (exactly one of `url` or `error` is set).
 - `CodeGeneratorTests`: length, alphabet, distinctness, edge lengths, and a chi-squared uniformity test that fails against the biased `byte % 62` generator.
 - `ExpiryPolicyTests`: the default, the minimum and maximum, and out-of-range values.
-- `InMemoryStoreTests`: concurrency (same key gives exactly one winner, and many distinct keys are all stored), expiry on read (alive 1 ms before, gone exactly at expiry, never-expiring entries), and the sweep (removes only expired entries, a second sweep removes nothing, a swept code can be added again). Time is controlled with `FakeTimeProvider`, so nothing sleeps.
+- `InMemoryStoreTests`: concurrency against the real in-memory store (same key gives exactly one winner, and many distinct keys are all stored).
+- `UrlStoreContractTests` and `ExpirySweeperContractTests`: abstract classes that hold the shared store behavior (atomic add, expiry on read, alive 1 ms before and gone exactly at expiry, a past `ExpiresAt` is rejected, case-sensitive codes, and the sweep). Each has an in-memory and a Postgres subclass, so both stores prove the same behavior. Time is controlled with `FakeTimeProvider`, so nothing sleeps.
+- The Postgres tests use Testcontainers, so **Docker must be running**, and one container is shared by all of them. Besides the contract subclasses: `PostgresRegistrationTests` (both interfaces resolve to one store, the hosted sweeper is registered, and a round trip works on an empty database, so the app creates its own schema), `PostgresUnavailableTests` (an unreachable database becomes `StorageUnavailableException`, with no container needed) and `PostgresMisconfiguredTests` (a database that does not exist is not an outage, so it is not translated).
 - `ExpirySweepServiceTests`: the background service with a fake sweeper and a `FakeTimeProvider`: it sweeps once per interval and not before, keeps running after a sweep throws, and stops cleanly (nothing sweeps after stop).
-- `ShortenEndpointTests`: the real pipeline in memory with `WebApplicationFactory`: the round trip, error responses, canonical `Location` headers, the retry limit and `503` path using a fake store (`CollidingStore`), 200 concurrent POSTs, and expiry through the endpoint with a fake clock.
+- `ShortenEndpointTests`: the real pipeline in memory with `WebApplicationFactory`: the round trip, error responses, canonical `Location` headers, the retry limit and `503` path using a fake store (`CollidingStore`), 200 concurrent POSTs, expiry through the endpoint with a fake clock, and a storage outage (`503`, not retried, nothing leaked) versus other store exceptions (`500`).
 
 Most tests were mutation-checked: the code was deliberately broken in a scratch copy (a removed lock, `>=` changed to `>`, an off-by-one retry, a biased generator, a wrong sweep interval) to confirm that a test fails.
 
@@ -38,7 +49,7 @@ Most tests were mutation-checked: the code was deliberately broken in a scratch 
 ## Project layout
 ```
 Shortener.slnx
-src/Shortener/            the web app: Program.cs, plus folders Api/, Expiry/, Storage/ (interfaces, InMemory/, and Postgres/ to come) and Urls/
+src/Shortener/            the web app: Program.cs, plus folders Api/, Expiry/, Storage/ (interfaces, `StorageUnavailableException`, InMemory/ and Postgres/) and Urls/
 tests/Shortener.Tests/    unit and endpoint tests, in folders that mirror src
 .editorconfig             4-space indent (2 for project, yml and json files)
 PLAN.md                   roadmap and current milestone
@@ -60,7 +71,7 @@ Responses:
 |---|---|
 | `201 Created` | Link created. Body is `{ "code": "...", "shortUrl": "..." }`, and the `Location` header holds the short URL. |
 | `400 Bad Request` | The URL failed validation, or `expiresInSeconds` is outside 60 to 31,536,000. The body is a JSON string that says which rule failed. |
-| `503 Service Unavailable` | Every code attempt collided. |
+| `503 Service Unavailable` | Every code attempt collided, or the storage is unavailable. |
 
 The stored URL is the canonical form (`Uri.AbsoluteUri`): the scheme and host are lowercased and default ports are dropped. Path, query and fragment keep their case.
 `HTTPS://Example.COM/Path?x=1` is stored as `https://example.com/Path?x=1`, and `http://example.com:80/a` as `http://example.com/a`.
@@ -70,6 +81,7 @@ The stored URL is the canonical form (`Uri.AbsoluteUri`): the scheme and host ar
 |---|---|
 | `302 Found` | Redirects, with `Location` set to the original URL. |
 | `404 Not Found` | Unknown or expired code. The two cases are deliberately indistinguishable. |
+| `503 Service Unavailable` | The storage is unavailable. |
 
 ## Manual testing with curl
 `-i` shows the status line and headers. Leave `-L` off, so you see the 302 itself and not the destination page.
@@ -160,16 +172,17 @@ Set `CodeLength` back to `7` afterwards.
 - The store keeps the canonical URL (`AbsoluteUri`) in a `LinkEntry`, not the raw input, and `GetAsync` returns only the URL, so the expiry decision stays inside the store.
 - **Expiry is an absolute time, computed on the server from a duration.** The client sends seconds, not a timestamp, so a wrong client clock or a missing time zone can't matter. Times are `DateTimeOffset` in UTC. The default is 30 days, and the range is 60 seconds to 365 days, so every link has a bounded lifetime.
 - **Expired means missing.** The check runs on every read (`now >= ExpiresAt`), so a link never redirects after its expiry, even before any cleanup. It returns `404`, the same as an unknown code, so a caller can't tell whether a code ever existed.
-- **Reads never delete.** An expired entry keeps occupying its code until a sweep removes it, so a code isn't reissued while stale links may still circulate. After a sweep the code can be reused. That is accepted for the in-memory store. At large scale the persistent store should use native TTL plus a never-reissue policy (see `PLAN.md`).
+- **Reads never delete.** An expired entry keeps occupying its code until a sweep removes it, so a code isn't reissued while stale links may still circulate. After a sweep the code can be reused. That is accepted for now. At large scale the persistent store needs a never-reissue policy (Postgres has no native TTL, so the sweeper's `DELETE` is what frees a code; see `PLAN.md`).
+- **A storage outage is a 503, translated by the store.** Each store turns its own provider errors into `StorageUnavailableException` (for Postgres, a transient `NpgsqlException` found in the inner chain, because EF wraps it in an `InvalidOperationException`), and the endpoints catch only that type, so the endpoint code does not depend on a database. An outage is not retried (the retry loop is for collisions), the response has no body, and other exceptions stay `500`.
 - **Time is injected** (`TimeProvider`, registered as `TimeProvider.System`), so tests advance a `FakeTimeProvider` instead of sleeping.
-- **`IExpirySweeper` is a separate interface** implemented by the in-memory store today. A Postgres store will implement it too (Postgres has no native TTL), while a store with native TTL, such as Redis, would not need it. The in-memory store is registered once and both interfaces forward to that single instance.
+- **`IExpirySweeper` is a separate interface** implemented by both stores (Postgres has no native TTL, so its sweeper deletes the expired rows), while a store with native TTL, such as Redis, would not need it. Each store is registered once and both interfaces forward to that single instance.
 - **The sweep runs in a background service.** The host calls `ExecuteAsync` once, so the service owns the loop. A failed sweep is caught and logged inside the loop and the next tick still runs, and only a cancellation from shutdown ends the loop. The sweep is an O(n) scan that holds the store's lock, so concurrent reads wait for it (measured: about 11 ms per million entries when nothing expires, and about 46 ms when everything does).
 
 ## Roadmap
 The detailed plan, with the current milestone and status, is in `PLAN.md`. In short:
 1. ~~URL validation~~, ~~endpoint and concurrency tests~~, ~~CI~~, ~~cryptographic codes~~ (done)
 2. Expiry: done (model, policy, read-time check, the measured store sweep, and the background service that runs it).
-3. Persistence behind `IUrlStore` (a key-value store with native TTL is the likely fit).
+3. Persistence behind `IUrlStore`: done for Postgres (the store, shared contract tests, registration and `503` on an outage). Docker Compose with a data volume is left, and Redis is planned later as a cache in front of it.
 4. Rate limiting, configuration through `IOptions<T>`, a health endpoint, structured logging, graceful shutdown.
 5. Dockerfile, deployment and a post-deploy smoke test.
 6. Async click counting with `Channel<T>`, caching, multi-instance design (shared store and ID allocation), load testing and failure injection.
