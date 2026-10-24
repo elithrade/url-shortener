@@ -11,28 +11,59 @@ public sealed class PostgresUrlStore(
     private readonly IDbContextFactory<ShortenerDbContext> _factory = factory;
     private readonly TimeProvider _clock = clock;
 
+    // EF wraps a transient failure in an InvalidOperationException, so the NpgsqlException is found in the inner chain.
+    private static bool IsUnavailable(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is NpgsqlException { IsTransient: true })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static StorageUnavailableException Unavailable(Exception inner) =>
+        new("Storage is unavailable", inner);
+
     public async ValueTask<string?> GetAsync(string code, CancellationToken ct)
     {
         var now = _clock.GetUtcNow();
-        await using var db = await _factory.CreateDbContextAsync(ct);
+        try
+        {
+            await using var db = await _factory.CreateDbContextAsync(ct);
 
-        return await db
-            .Links.AsNoTracking()
-            // code is case-sensitive
-            .Where(r => r.Code == code)
-            .Where(r => r.ExpiresAt == null || r.ExpiresAt > now)
-            .Select(r => r.Url)
-            .FirstOrDefaultAsync(ct);
+            return await db
+                .Links.AsNoTracking()
+                // code is case-sensitive
+                .Where(r => r.Code == code)
+                .Where(r => r.ExpiresAt == null || r.ExpiresAt > now)
+                .Select(r => r.Url)
+                .FirstOrDefaultAsync(ct);
+        }
+        catch (Exception ex) when (IsUnavailable(ex))
+        {
+            throw Unavailable(ex);
+        }
     }
 
     public async ValueTask<int> SweepAsync(CancellationToken ct)
     {
         var now = _clock.GetUtcNow();
-        await using var db = await _factory.CreateDbContextAsync(ct);
+        try
+        {
+            await using var db = await _factory.CreateDbContextAsync(ct);
 
-        return await db
-            .Links.Where(r => r.ExpiresAt != null && r.ExpiresAt <= now)
-            .ExecuteDeleteAsync(ct);
+            return await db
+                .Links.Where(r => r.ExpiresAt != null && r.ExpiresAt <= now)
+                .ExecuteDeleteAsync(ct);
+        }
+        catch (Exception ex) when (IsUnavailable(ex))
+        {
+            throw Unavailable(ex);
+        }
     }
 
     public async ValueTask<bool> TryAddAsync(string code, LinkEntry linkEntry, CancellationToken ct)
@@ -73,6 +104,10 @@ public sealed class PostgresUrlStore(
             )
         {
             return false;
+        }
+        catch (Exception ex) when (IsUnavailable(ex))
+        {
+            throw Unavailable(ex);
         }
     }
 }

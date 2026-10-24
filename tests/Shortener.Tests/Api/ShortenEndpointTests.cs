@@ -118,7 +118,7 @@ public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>
     public async Task Returns_503_after_max_attempts_when_every_code_collide()
     {
         var alwaysFailStore = CollidingStore.Always();
-        var collidingClient = NewCollidingClient(alwaysFailStore);
+        var collidingClient = NewClient(alwaysFailStore);
 
         var response = await collidingClient.PostAsJsonAsync(
             "/shorten",
@@ -136,7 +136,7 @@ public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>
     public async Task Succeeds_when_collision_under_limit(int collisions)
     {
         var store = new CollidingStore(collisions);
-        var collidingClient = NewCollidingClient(store);
+        var collidingClient = NewClient(store);
 
         var response = await collidingClient.PostAsJsonAsync(
             "/shorten",
@@ -166,7 +166,7 @@ public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>
     )
     {
         var store = new CollidingStore(collisions);
-        var collidingClient = NewCollidingClient(store);
+        var collidingClient = NewClient(store);
 
         var response = await collidingClient.PostAsJsonAsync(
             "/shorten",
@@ -340,6 +340,83 @@ public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>
         Assert.IsType<InMemoryUrlStore>(store);
     }
 
+    [Fact]
+    public async Task Unavailable_store_returns_503_on_post()
+    {
+        var exceptionStore = new ExceptionStore(
+            new StorageUnavailableException(
+                "Store is not available",
+                new InvalidOperationException("secret:1234")
+            )
+        );
+
+        var client = NewClient(exceptionStore);
+        var response = await client.PostAsJsonAsync(
+            "/shorten",
+            new { url = "https://example.com/path" }
+        );
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        // breaks on the first attempts
+        Assert.Equal(1, exceptionStore.Attempts);
+
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("secret:1234", body);
+    }
+
+    [Fact]
+    public async Task Unavailable_store_returns_503_on_get()
+    {
+        var exceptionStore = new ExceptionStore(
+            new StorageUnavailableException(
+                "Store is not available",
+                new InvalidOperationException("secret:1234")
+            )
+        );
+
+        var client = NewClient(exceptionStore);
+        var response = await client.GetAsync("/abc");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("secret:1234", body);
+    }
+
+    [Fact]
+    public async Task Other_store_exceptions_return_500_on_post()
+    {
+        var exceptionStore = new ExceptionStore(
+            new InvalidOperationException(
+                "Missing connection string",
+                new InvalidOperationException()
+            )
+        );
+
+        var client = NewClient(exceptionStore);
+        var response = await client.PostAsJsonAsync(
+            "/shorten",
+            new { url = "https://example.com/path" }
+        );
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        // breaks on the first attempts
+        Assert.Equal(1, exceptionStore.Attempts);
+    }
+
+    [Fact]
+    public async Task Other_store_exceptions_return_500_on_get()
+    {
+        var exceptionStore = new ExceptionStore(
+            new ArgumentException("Code is too long", new InvalidOperationException())
+        );
+
+        var client = NewClient(exceptionStore);
+        var response = await client.GetAsync("/abc");
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+    }
+
     private (HttpClient, FakeTimeProvider) NewFakeTimerClient(DateTimeOffset now)
     {
         var clock = new FakeTimeProvider(now);
@@ -359,12 +436,12 @@ public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>
         );
     }
 
-    private HttpClient NewCollidingClient(CollidingStore store)
+    private HttpClient NewClient(IUrlStore store)
     {
         var factory = _factory.WithWebHostBuilder(b =>
             b.ConfigureServices(s =>
             {
-                s.AddSingleton<IUrlStore>(store);
+                s.AddSingleton(store);
             })
         );
 

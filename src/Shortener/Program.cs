@@ -88,7 +88,17 @@ app.MapPost(
 
             var linkEntry = new LinkEntry(validatedUrl.AbsoluteUri, expiryAt);
 
-            var added = await store.TryAddAsync(code, linkEntry, ct);
+            bool added;
+            try
+            {
+                added = await store.TryAddAsync(code, linkEntry, ct);
+            }
+            catch (StorageUnavailableException ex)
+            {
+                HandlerLog.StorageUnavailable(app.Logger, ex);
+                return Results.StatusCode(503);
+            }
+
             if (added)
             {
                 var request = ctx.Request;
@@ -106,7 +116,17 @@ app.MapGet(
     "/{code}",
     async (string code, IUrlStore store, CancellationToken ct) =>
     {
-        var url = await store.GetAsync(code, ct);
+        string? url = null;
+        try
+        {
+            url = await store.GetAsync(code, ct);
+        }
+        catch (StorageUnavailableException ex)
+        {
+            HandlerLog.StorageUnavailable(app.Logger, ex);
+            return Results.StatusCode(503);
+        }
+
         if (url != null)
         {
             return Results.Redirect(url);
@@ -122,4 +142,10 @@ internal static partial class StartupLog
 {
     [LoggerMessage(Level = LogLevel.Information, Message = "Using {Storage} storage")]
     public static partial void UsingStorage(ILogger logger, string storage);
+}
+
+internal static partial class HandlerLog
+{
+    [LoggerMessage(Level = LogLevel.Error, Message = "Storage unavailable")]
+    public static partial void StorageUnavailable(ILogger logger, Exception exception);
 }
