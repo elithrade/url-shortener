@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Testcontainers.PostgreSql;
 
@@ -27,8 +28,10 @@ public sealed class PostgresFixture : IAsyncLifetime
             )
             .BuildServiceProvider();
 
-        await using var db = await Factory.CreateDbContextAsync();
-        await db.Database.EnsureCreatedAsync();
+        // The same step production runs, so a model change without a migration fails the tests.
+        var exitCode = await SchemaMigrator.ExecuteAsync(Factory, NullLogger.Instance);
+        if (exitCode != 0)
+            throw new InvalidOperationException("The test database could not be migrated.");
     }
 
     public async Task ResetAsync()
@@ -37,7 +40,7 @@ public sealed class PostgresFixture : IAsyncLifetime
         await db.Database.ExecuteSqlRawAsync("TRUNCATE TABLE links");
     }
 
-    // A new database in the same container with no tables, so a test can prove the app creates its own schema.
+    // A new database in the same container with no tables, so a test can prove the migrator creates the schema.
     public async Task<TemporaryDatabase> CreateEmptyDatabaseAsync()
     {
         var name = $"reg_{Guid.NewGuid():N}";
