@@ -75,10 +75,40 @@ public sealed class PostgresFixture : IAsyncLifetime
 
 public sealed class TemporaryDatabase(string connectionString, Func<Task> drop) : IAsyncDisposable
 {
+    private ServiceProvider? _provider;
+
+    public IDbContextFactory<ShortenerDbContext> Factory
+    {
+        get
+        {
+            _provider ??= new ServiceCollection()
+                .AddDbContextFactory<ShortenerDbContext>(o => o.UseNpgsql(ConnectionString))
+                .BuildServiceProvider();
+
+            return _provider.GetRequiredService<IDbContextFactory<ShortenerDbContext>>();
+        }
+    }
+
     public string ConnectionString { get; } = connectionString;
+
+    // to_regclass returns NULL for a missing table instead of throwing.
+    public async Task<bool> TableExistsAsync(string table)
+    {
+        await using var connection = new NpgsqlConnection(ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(
+            "SELECT to_regclass(@name) IS NOT NULL",
+            connection
+        );
+        command.Parameters.AddWithValue("name", $"public.{table}");
+        return (bool)(await command.ExecuteScalarAsync())!;
+    }
 
     public async ValueTask DisposeAsync()
     {
+        if (_provider != null)
+            await _provider.DisposeAsync();
+
         NpgsqlConnection.ClearAllPools();
         await drop();
     }

@@ -37,12 +37,19 @@ builder.Services.AddHostedService<ExpirySweepService>();
 var app = builder.Build();
 StartupLog.UsingStorage(app.Logger, usePostgres ? "Postgres" : "InMemory");
 
-if (usePostgres)
+if (args.Length > 0 && args[0] == "migrate")
 {
-    var dbFactory = app.Services.GetRequiredService<IDbContextFactory<ShortenerDbContext>>();
-    await using var db = await dbFactory.CreateDbContextAsync();
+    if (usePostgres)
+    {
+        var factory = app.Services.GetRequiredService<IDbContextFactory<ShortenerDbContext>>();
+        var exitCode = await SchemaMigrator.ExecuteAsync(factory, app.Logger);
 
-    await db.Database.EnsureCreatedAsync();
+        return exitCode;
+    }
+
+    StartupLog.UnableToMigrate(app.Logger);
+
+    return 1;
 }
 
 const int MaxAttempts = 5;
@@ -138,10 +145,18 @@ app.MapGet(
 
 app.Run();
 
+return 0;
+
 internal static partial class StartupLog
 {
     [LoggerMessage(Level = LogLevel.Information, Message = "Using {Storage} storage")]
     public static partial void UsingStorage(ILogger logger, string storage);
+
+    [LoggerMessage(
+        Level = LogLevel.Error,
+        Message = "Migration can only run on Postgres storage type"
+    )]
+    public static partial void UnableToMigrate(ILogger logger);
 }
 
 internal static partial class HandlerLog

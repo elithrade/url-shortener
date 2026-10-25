@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Shortener.Tests;
 
@@ -38,10 +39,12 @@ public class PostgresRegistrationTests(
     }
 
     [Fact]
-    public async Task Request_roundtrip_works_with_empty_database_with_no_schema()
+    public async Task Request_roundtrip_works_with_migrated_database_with_schema()
     {
-        // the test checks EnsureCreatedAsync is called on a fresh new db
         await using var db = await fixture.CreateEmptyDatabaseAsync();
+        var exitCode = await SchemaMigrator.ExecuteAsync(db.Factory, NullLogger.Instance);
+        Assert.Equal(0, exitCode);
+
         await using var factory = CreateFactory(db.ConnectionString);
 
         var client = factory.CreateClient(
