@@ -26,7 +26,24 @@ docker run -d --rm --name pg -e POSTGRES_PASSWORD=dev -p 5432:5432 postgres:17
 Storage=Postgres ConnectionStrings__Shortener="Host=localhost;Username=postgres;Password=dev;Database=postgres" \
   dotnet run --project src/Shortener
 ```
-The app creates the `links` table at startup (`EnsureCreatedAsync`), which is only safe for one instance: two instances starting together on an empty database can race (measured in `PLAN.md`). That container has no volume, so its data is lost when it stops.
+The app does not create its own schema. Run the one-shot migration step first, against an existing (empty) database:
+```bash
+Storage=Postgres ConnectionStrings__Shortener="Host=localhost;Username=postgres;Password=dev;Database=postgres" \
+  dotnet run --project src/Shortener -- migrate
+```
+`migrate` applies the EF Core migrations (`src/Shortener/Storage/Postgres/Migrations`) and exits without starting the web server. It exits `0` on success and `1` on failure (an unreachable database, or `Storage` not set to `Postgres`), and running it again is harmless. It does not create the database itself. Only one process should run it, which is why it is a separate step and not part of app startup (two `CREATE TABLE`s at once can race; measured in `PLAN.md`). The container above has no volume, so its data is lost when it stops.
+
+### With Docker Compose
+`compose.yaml` runs Postgres (with a `pgdata` volume), the one-shot `migrate` service, and the app, in that order. Set `POSTGRES_PASSWORD` first (in the shell, or in an untracked `.env` file next to `compose.yaml`; any value without `;` or `=` works locally):
+```bash
+echo POSTGRES_PASSWORD=dev-only-pw-123 > .env
+docker compose up -d --wait
+curl -i -X POST http://localhost:8080/shorten -H "Content-Type: application/json" -d '{"url":"https://example.com"}'
+docker compose down        # keeps the volume, so links survive; add -v to delete the data
+```
+The password is only read when Postgres first creates its data directory, so changing it later needs `docker compose down -v`. The app listens on `8080` in the container.
+
+To add a migration after changing the model: `dotnet tool restore`, then `dotnet tool run dotnet-ef migrations add <Name> --project src/Shortener --output-dir Storage/Postgres/Migrations`, and change the generated namespace to `Shortener`.
 
 ## Tests
 ```bash
@@ -37,7 +54,7 @@ dotnet test
 - `ExpiryPolicyTests`: the default, the minimum and maximum, and out-of-range values.
 - `InMemoryStoreTests`: concurrency against the real in-memory store (same key gives exactly one winner, and many distinct keys are all stored).
 - `UrlStoreContractTests` and `ExpirySweeperContractTests`: abstract classes that hold the shared store behavior (atomic add, expiry on read, alive 1 ms before and gone exactly at expiry, a past `ExpiresAt` is rejected, case-sensitive codes, and the sweep). Each has an in-memory and a Postgres subclass, so both stores prove the same behavior. Time is controlled with `FakeTimeProvider`, so nothing sleeps.
-- The Postgres tests use Testcontainers, so **Docker must be running**, and one container is shared by all of them. Besides the contract subclasses: `PostgresRegistrationTests` (both interfaces resolve to one store, the hosted sweeper is registered, and a round trip works on an empty database, so the app creates its own schema), `PostgresUnavailableTests` (an unreachable database becomes `StorageUnavailableException`, with no container needed) and `PostgresMisconfiguredTests` (a database that does not exist is not an outage, so it is not translated).
+- The Postgres tests use Testcontainers, so **Docker must be running**, and one container is shared by all of them. Besides the contract subclasses: `PostgresRegistrationTests` (both interfaces resolve to one store, the hosted sweeper is registered, and a round trip works on a database that the test migrated first, since the app does not create the schema), `PostgresMigrationTests` (`SchemaMigrator` on an empty database creates the table and records `InitialCreate` in the migration history, running it twice keeps the data, and an unreachable database returns `1` without throwing), `PostgresUnavailableTests` (an unreachable database becomes `StorageUnavailableException`, with no container needed) and `PostgresMisconfiguredTests` (a database that does not exist is not an outage, so it is not translated).
 - `ExpirySweepServiceTests`: the background service with a fake sweeper and a `FakeTimeProvider`: it sweeps once per interval and not before, keeps running after a sweep throws, and stops cleanly (nothing sweeps after stop).
 - `ShortenEndpointTests`: the real pipeline in memory with `WebApplicationFactory`: the round trip, error responses, canonical `Location` headers, the retry limit and `503` path using a fake store (`CollidingStore`), 200 concurrent POSTs, expiry through the endpoint with a fake clock, and a storage outage (`503`, not retried, nothing leaked) versus other store exceptions (`500`).
 
@@ -49,9 +66,11 @@ Most tests were mutation-checked: the code was deliberately broken in a scratch 
 ## Project layout
 ```
 Shortener.slnx
-src/Shortener/            the web app: Program.cs, plus folders Api/, Expiry/, Storage/ (interfaces, `StorageUnavailableException`, InMemory/ and Postgres/) and Urls/
+src/Shortener/            the web app: Program.cs, plus folders Api/, Expiry/, Storage/ (interfaces, `StorageUnavailableException`, InMemory/ and Postgres/, which holds `SchemaMigrator` and the EF migrations) and Urls/
 tests/Shortener.Tests/    unit and endpoint tests, in folders that mirror src
 .editorconfig             4-space indent (2 for project, yml and json files)
+Dockerfile, compose.yaml  image for the app, and a local stack (Postgres, migrate step, app)
+dotnet-tools.json         the local `dotnet-ef` tool
 PLAN.md                   roadmap and current milestone
 LESSONS.md                self-test flashcards
 AGENTS.md                 instructions for AI coding agents (CLAUDE.md points to it)
@@ -182,9 +201,9 @@ Set `CodeLength` back to `7` afterwards.
 The detailed plan, with the current milestone and status, is in `PLAN.md`. In short:
 1. ~~URL validation~~, ~~endpoint and concurrency tests~~, ~~CI~~, ~~cryptographic codes~~ (done)
 2. Expiry: done (model, policy, read-time check, the measured store sweep, and the background service that runs it).
-3. Persistence behind `IUrlStore`: done for Postgres (the store, shared contract tests, registration and `503` on an outage). Docker Compose with a data volume is left, and Redis is planned later as a cache in front of it.
+3. Persistence behind `IUrlStore`: done for Postgres (the store, shared contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and Docker Compose with a data volume, checked by restarting the stack). Redis is planned later as a cache in front of it.
 4. Rate limiting, configuration through `IOptions<T>`, a health endpoint, structured logging, graceful shutdown.
-5. Dockerfile, deployment and a post-deploy smoke test.
+5. Deployment (the Dockerfile exists; CI image build and push, a host, and a post-deploy smoke test are left).
 6. Async click counting with `Channel<T>`, caching, multi-instance design (shared store and ID allocation), load testing and failure injection.
 7. A UI.
 

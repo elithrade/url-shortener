@@ -8,8 +8,10 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It 
 ## Layout
 ```
 Shortener.slnx
-src/Shortener/            web app: Program.cs and folders Api/, Expiry/, Storage/ (IUrlStore, IExpirySweeper, LinkEntry, InMemory/, Postgres/ with LinkRecord, ShortenerDbContext, PostgresUrlStore), Urls/ (UrlValidator, CodeGenerator). All code stays in the single namespace `Shortener`
+src/Shortener/            web app: Program.cs and folders Api/, Expiry/, Storage/ (IUrlStore, IExpirySweeper, LinkEntry, InMemory/, Postgres/ with LinkRecord, ShortenerDbContext, PostgresUrlStore, SchemaMigrator, DesignTimeDbContextFactory and Migrations/), Urls/ (UrlValidator, CodeGenerator). All code stays in the single namespace `Shortener`
 tests/Shortener.Tests/    unit tests and endpoint tests (xUnit, WebApplicationFactory), in folders that mirror src. Namespace `Shortener.Tests`. Store behavior lives in abstract contract classes (`UrlStoreContractTests`, `ExpirySweeperContractTests`) with an in-memory and a Postgres subclass each. The Postgres ones need Docker running (Testcontainers, one shared container via `[Collection("postgres")]`)
+Dockerfile, compose.yaml  image for the app and a local stack (Postgres, a one-shot migrate step, the app)
+dotnet-tools.json         local tool manifest (dotnet-ef)
 ```
 The test project has no `Program.cs` of its own. `WebApplicationFactory<Program>` reaches the app through the project reference.
 
@@ -17,6 +19,9 @@ The test project has no `Program.cs` of its own. `WebApplicationFactory<Program>
 - Build and test everything: `dotnet test` (run from the repo root).
 - Run the app: `dotnet run --project src/Shortener` (listens on `http://localhost:5154`).
 - Format C# with `csharpier`.
+- Apply the schema: `Storage=Postgres ConnectionStrings__Shortener=... dotnet run --project src/Shortener -- migrate` (exits 0 or 1, never starts the server). The app itself never creates the schema.
+- New migration: `dotnet tool restore`, then `dotnet tool run dotnet-ef migrations add <Name> --project src/Shortener --output-dir Storage/Postgres/Migrations`, and change the generated namespace to `Shortener`.
+- Local stack: `POSTGRES_PASSWORD=<any> docker compose up -d --wait` (app on port 8080). Never commit a password; `.env` is ignored.
 - Run `dotnet test` before saying a change is done, and report the result.
 
 ## Commit messages
@@ -43,6 +48,8 @@ The test project has no `Program.cs` of its own. `WebApplicationFactory<Program>
 - Error messages describe the rule the client must meet. They must not reveal implementation details or echo user input.
 - Endpoint tests use `AllowAutoRedirect = false`, assert the status before reading the body, and use unique URLs, because the in-memory store is shared within a test class.
 - A test should be able to fail. For logic that matters, temporarily break the code (for example `<=` instead of `<`) and confirm that a test goes red.
+- Keep `Microsoft.EntityFrameworkCore.Design` and the `dotnet-ef` tool on the EF Core version that the Npgsql provider requires (now 10.0.4). A higher version raised the app's EF Core and broke the test project build (CS1705).
+- Never call `Environment.Exit` in code that tests also run (it killed the test host and hid every result). Return an exit code from `Program.cs` instead.
 - Use `WithWebHostBuilder(... ConfigureServices ...)` to substitute fakes such as `AlwaysCollidingStore`.
 - Supply settings that `Program.cs` reads at startup with `UseSetting`, not `ConfigureAppConfiguration` (the latter is ignored).
 - A database store's tests go in the shared contract classes, so every store proves the same behavior. A passing suite doesn't prove coverage: mutate the code to find what isn't tested.
