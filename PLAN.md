@@ -54,6 +54,14 @@ Legend: `[x]` done, `[ ]` to do.
 | 3 | Nov 2 to 6 | Milestones 6, 7: rate limiting, config, health, logging, Dockerfile |
 | 4 | Nov 9 to 13 | Milestone 8: deploy, smoke test, README. **v1 live** |
 
+## Deployment shape (notes for milestone 8 and Line 2)
+Decided in discussion, not yet built:
+- **The API and the database are never one container.** Separate containers, one main process each. Reasons: (1) scaling: with a database inside each API container, instances would hold different links and could issue the same code twice, because uniqueness comes from one shared primary key (Line 2, item C); (2) the API is stateless and replaceable, while the database needs a volume, backups and careful upgrades, so redeploying one must not restart the other; (3) different resources and failure modes; (4) health checks, logs and limits stay meaningful per container.
+- **v1 layout:** the same shape as `compose.yaml` on one VM (Postgres with a volume, the `migrate` step, the app), or a **managed Postgres** with only the API deployed. The managed option gives backups, failover and patching, and is the one to lean towards if the data matters. This is still the open "decide first" item in milestone 8.
+- **Several API instances:** N copies behind a load balancer, all on the same database. The `migrate` step runs once per deploy, not once per instance (the `EnsureCreatedAsync` race). During a rolling deploy the old version runs against the new schema for a while, so schema changes should be additive first (expand), with drops and renames in a later release (contract).
+- **Redis** (Line 2, item B) is its own service, never inside the API container: a read-through cache in front of Postgres, a cache TTL that never outlives `ExpiresAt`, eviction allowed (a lost entry costs one read), and redirects must still work when Redis is down.
+- Not covered yet: the load balancer and forwarded headers (the rate limiter's client key and the self-link check both depend on them), secrets in the host's store, and backup and restore tests.
+
 ## After v1: mock-interview drill
 Once v1 is live, before Line 2: ask the coach to quiz you from `LESSONS.md`.
 - Cold questions: you answer from memory, and the card is revealed afterwards.
