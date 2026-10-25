@@ -1,0 +1,38 @@
+# Local run: Postgres, a one-shot schema step, then the app.
+# Needs POSTGRES_PASSWORD in the environment or in an untracked .env file.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: shortener
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d shortener"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    build: .
+    command: ["migrate"]
+    restart: "no"
+    environment: &app-env
+      Storage: Postgres
+      ConnectionStrings__Shortener: Host=postgres;Database=shortener;Username=postgres;Password=${POSTGRES_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
