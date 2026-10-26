@@ -1,14 +1,32 @@
 namespace Shortener;
 
-// Per-key state. Mutable on purpose: the limiter changes it in place under a lock.
-internal sealed class TokenBucket
+internal sealed class TokenBucket(TokenBucketOptions options, DateTimeOffset createdAt)
 {
-    public double Tokens { get; set; }
-    public DateTimeOffset LastRefill { get; set; }
+    private readonly TokenBucketOptions _options = options;
+    private readonly Lock _lock = new();
 
-    public TokenBucket(double tokens, DateTimeOffset lastRefill)
+    private DateTimeOffset _lastRefill = createdAt;
+    private double _tokens = options.Capacity;
+
+    public RateLimitResult TryTake(DateTimeOffset now)
     {
-        Tokens = tokens;
-        LastRefill = lastRefill;
+        lock (_lock)
+        {
+            var elapsed = now - _lastRefill;
+            var refillRate = _options.TokenRefillPerSeconds;
+
+            _tokens = Math.Min(_options.Capacity, _tokens + elapsed.TotalSeconds * refillRate);
+            _lastRefill = now;
+
+            if (_tokens >= 1)
+            {
+                _tokens -= 1;
+                return RateLimitResult.Allowed;
+            }
+
+            return RateLimitResult.Rejected(
+                TimeSpan.FromSeconds(Math.Ceiling((1 - _tokens) / refillRate))
+            );
+        }
     }
 }

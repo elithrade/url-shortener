@@ -16,4 +16,6 @@ public sealed record TokenBucketOptions
         TokensPerPeriod = tokensPerPeriod;
         Period = period;
     }
+
+    public double TokenRefillPerSeconds => TokensPerPeriod / Period.TotalSeconds;
 }
