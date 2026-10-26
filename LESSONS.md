@@ -1046,3 +1046,45 @@ A refused connection gives an unreachable database with no Docker and without st
 No (verified): a URL with 2,000 `é` is 2,020 characters long, but its canonical form is **12,020** characters, because each `é` becomes `%C3%A9` (6 characters). `https://example.com/` plus 400 `é` is 420 characters of input and 20 + 6 × 400 = 2,420 canonical, so the input check passes and the column would reject it (I expect SQLSTATE `22001`, which our `23505` filter would not catch, so it would be a 500). The fix is a second check after parsing, `parsedUrl.AbsoluteUri.Length > MAX_LENGTH`, with its own message, and **the input check stays**: it is a cheap early reject that bounds the parse work, and the two are independent. The canonical form can also be shorter than the input (`http://example.com:80/a` becomes `http://example.com/a`). Tests: 420 characters in and 2,420 canonical is rejected (assert the message, so only the new check can have rejected it), exactly 2,048 canonical is accepted (assert `uri.AbsoluteUri.Length == 2048` so the setup proves itself), and 2,049 is rejected, so a loosened comparison fails one side or the other. In a bounded column, the length counts characters, and canonical output is ASCII, so characters equal bytes.
 </details>
 
+
+## 20. Rate limiting with a token bucket
+
+<details><summary>Why is a <code>SemaphoreSlim(5)</code> not a rate limiter?</summary>
+
+It limits **concurrency** (how many requests run at once), and a permit comes back when the work finishes. With 10 ms requests, one client can still send 500 per second. A rate limiter returns permits as **time** passes. A semaphore is the right tool for a bulkhead (protecting a resource such as a connection pool), which is .NET's `ConcurrencyLimiter`. It also has no notion of a client unless you keep one per key.
+</details>
+
+<details><summary>What does each token bucket store, and what does the limiter store instead?</summary>
+
+Per key only `tokens` and `lastRefill`. Capacity and refill rate are policy, shared by every bucket, so they live in the options. Refill is lazy: on each request, `tokens = min(capacity, tokens + elapsed × rate)`, so an idle bucket costs no work, only memory (which is what idle eviction is for). A rejection is `(1 − tokens) / rate`. Over any period T a client gets at most `capacity + rate × T`.
+</details>
+
+<details><summary>A bucket allows 3, refills 0.1 tokens per second, and the clock moves 1 s between calls. Is the 4th call's <code>RetryAfter</code> exactly 7 s?</summary>
+
+No (verified): in IEEE doubles the tokens come out as `0.30000000000000016`, the wait as `6.999999999999998` s, and `TimeSpan.FromSeconds` of that is 69,999,999 ticks, so `Assert.Equal(Rejected(7 s), result)` fails against a correct implementation. Short by a tick is the harmful direction: a client that waits exactly as told is rejected again. It gets worse (caught by a test that waits exactly `RetryAfter` after a partial token): after waiting 6.9999999 s the bucket holds `0.99999999…`, so the call is rejected again, the remaining wait is a few billionths of a second, `TimeSpan.FromSeconds` truncates it to **0 ticks**, and `Rejected(TimeSpan.Zero)` throws `ArgumentOutOfRangeException`, which would be a 500 for a client that did exactly what it was told. "The missing part of a token is always positive, so the wait can't be zero" is true in real numbers, not after truncation to ticks. Fixes: round the wait **up** to whole ticks (`Math.Ceiling` on the tick count, then `TimeSpan.FromTicks`), which gives exactly 7 s and never less than 1 tick, or integer ticks per token throughout. The `Rejected` guard did its job: it turned an invalid wait into a loud failure instead of a silent `Retry-After: 0`. Round to whole seconds only in the HTTP filter (`Retry-After`), never in the limiter, or partial-token tests can't tell right from wrong.
+</details>
+
+<details><summary>The burst test passed, yet <code>RetryAfter</code> was <code>(1 − tokens) * rate</code>. Why was nothing red, and how should the bug have been caught?</summary>
+
+The test only asserted `IsAllowed`, so no test looked at the wait at all. The units show the bug (tokens × tokens per second is not a time; it gave 0.1 s instead of 10 s). Write the `RetryAfter` test before the formula and see it red, or afterwards put the wrong formula back and confirm the test goes red.
+</details>
+
+<details><summary>Seven <code>[Fact]</code>s pass, and six of them have empty bodies. What does the run tell you?</summary>
+
+Nothing about those six: an empty test is reported green. Placeholders should be `[Fact(Skip = "todo")]` (shown as skipped) or not exist yet.
+</details>
+
+<details><summary>Why can a token bucket lose or gain tokens when the server's clock is corrected backwards?</summary>
+
+`GetUtcNow()` is wall-clock time. A negative `elapsed` subtracts tokens, and `lastRefill` moves back, so the next call refills the skipped interval again. Clamp a negative `elapsed` to zero (or use the monotonic `TimeProvider.GetTimestamp()`). `FakeTimeProvider` can't go backwards, so this guard is hard to test.
+</details>
+
+<details><summary><code>_buckets.GetOrAdd(key, _ => new TokenBucket(_options, now))</code> runs on every request. What does it allocate when the key already exists?</summary>
+
+A closure object for `now` and `this`, plus a delegate, on every call, even though the factory doesn't run. The `GetOrAdd(key, factory, arg)` overload with a `static` lambda and a value tuple `(Options, Now)` allocates nothing, and `static` makes the compiler reject any capture. Reading `_options` inside the lambda counts as capturing `this`. Not measured here, and irrelevant at this traffic.
+</details>
+
+<details><summary>Why limit <code>POST /shorten</code> per IP but not <code>GET /{code}</code>?</summary>
+
+Writes grow the table, use up the code space and are how spam and phishing links get in, and real users send few. Reads are most of the traffic and cheap (a primary-key lookup), and many real users share one NAT IP, so a strict per-IP `GET` limit hurts them. The `GET` risk is enumeration, and the targeted defense is limiting **404s** per client. Read load belongs to the cache or a CDN.
+</details>

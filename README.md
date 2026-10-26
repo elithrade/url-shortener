@@ -52,6 +52,7 @@ dotnet test
 - `UrlValidatorTests`: rejected input (empty, malformed, bad schemes, credentials, own host, length limit), the canonical form of accepted URLs, and the `TryValidate` contract (exactly one of `url` or `error` is set).
 - `CodeGeneratorTests`: length, alphabet, distinctness, edge lengths, and a chi-squared uniformity test that fails against the biased `byte % 62` generator.
 - `ExpiryPolicyTests`: the default, the minimum and maximum, and out-of-range values.
+- `TokenBucketLimiterTests`: the token bucket limiter with a fake clock: a burst of capacity then a rejection, the exact `RetryAfter` after a partial refill, waiting exactly `RetryAfter` allows exactly one more request, refill capped at capacity, independent keys, and the options guards.
 - `InMemoryStoreTests`: concurrency against the real in-memory store (same key gives exactly one winner, and many distinct keys are all stored).
 - `UrlStoreContractTests` and `ExpirySweeperContractTests`: abstract classes that hold the shared store behavior (atomic add, expiry on read, alive 1 ms before and gone exactly at expiry, a past `ExpiresAt` is rejected, case-sensitive codes, and the sweep). Each has an in-memory and a Postgres subclass, so both stores prove the same behavior. Time is controlled with `FakeTimeProvider`, so nothing sleeps.
 - The Postgres tests use Testcontainers, so **Docker must be running**, and one container is shared by all of them. Besides the contract subclasses: `PostgresRegistrationTests` (both interfaces resolve to one store, the hosted sweeper is registered, and a round trip works on a database that the test migrated first, since the app does not create the schema), `PostgresMigrationTests` (`SchemaMigrator` on an empty database creates the table and records `InitialCreate` in the migration history, running it twice keeps the data, and an unreachable database returns `1` without throwing), `PostgresUnavailableTests` (an unreachable database becomes `StorageUnavailableException`, with no container needed) and `PostgresMisconfiguredTests` (a database that does not exist is not an outage, so it is not translated).
@@ -66,7 +67,7 @@ Most tests were mutation-checked: the code was deliberately broken in a scratch 
 ## Project layout
 ```
 Shortener.slnx
-src/Shortener/            the web app: Program.cs, plus folders Api/, Expiry/, Storage/ (interfaces, `StorageUnavailableException`, InMemory/ and Postgres/, which holds `SchemaMigrator` and the EF migrations) and Urls/
+src/Shortener/            the web app: Program.cs, plus folders Api/, Expiry/, RateLimiting/ (a token bucket limiter, not wired into the app yet), Storage/ (interfaces, `StorageUnavailableException`, InMemory/ and Postgres/, which holds `SchemaMigrator` and the EF migrations) and Urls/
 tests/Shortener.Tests/    unit and endpoint tests, in folders that mirror src
 .editorconfig             4-space indent (2 for project, yml and json files)
 Dockerfile, compose.yaml  image for the app, and a local stack (Postgres, migrate step, app)

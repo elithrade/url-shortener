@@ -8,7 +8,7 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It 
 ## Layout
 ```
 Shortener.slnx
-src/Shortener/            web app: Program.cs and folders Api/, Expiry/, Storage/ (IUrlStore, IExpirySweeper, LinkEntry, InMemory/, Postgres/ with LinkRecord, ShortenerDbContext, PostgresUrlStore, SchemaMigrator, DesignTimeDbContextFactory and Migrations/), Urls/ (UrlValidator, CodeGenerator). All code stays in the single namespace `Shortener`
+src/Shortener/            web app: Program.cs and folders Api/, Expiry/, RateLimiting/ (IRateLimiter, RateLimitResult, TokenBucketOptions, TokenBucket, TokenBucketLimiter; not wired into the app yet), Storage/ (IUrlStore, IExpirySweeper, LinkEntry, InMemory/, Postgres/ with LinkRecord, ShortenerDbContext, PostgresUrlStore, SchemaMigrator, DesignTimeDbContextFactory and Migrations/), Urls/ (UrlValidator, CodeGenerator). All code stays in the single namespace `Shortener`
 tests/Shortener.Tests/    unit tests and endpoint tests (xUnit, WebApplicationFactory), in folders that mirror src. Namespace `Shortener.Tests`. Store behavior lives in abstract contract classes (`UrlStoreContractTests`, `ExpirySweeperContractTests`) with an in-memory and a Postgres subclass each. The Postgres ones need Docker running (Testcontainers, one shared container via `[Collection("postgres")]`)
 Dockerfile, compose.yaml  image for the app and a local stack (Postgres, a one-shot migrate step, the app)
 dotnet-tools.json         local tool manifest (dotnet-ef)
