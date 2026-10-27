@@ -128,6 +128,20 @@ public class TokenBucketLimiterTests
     }
 
     [Fact]
+    public async Task A_sub_second_wait_is_not_rounded_up_to_whole_second()
+    {
+        const int capacity = 1;
+        // 2 tokens per second
+        var (rateLimiter, _) = CreateLimiter(capacity, 2, TimeSpan.FromSeconds(1));
+
+        await DrainAsync(rateLimiter, Key, capacity);
+
+        var rejected = await rateLimiter.AcquireAsync(Key);
+        Assert.False(rejected.IsAllowed);
+        Assert.Equal(TimeSpan.FromMilliseconds(500), rejected.RetryAfter);
+    }
+
+    [Fact]
     public void Options_accept_boundary_values()
     {
         var options = new TokenBucketOptions(1, 1, TimeSpan.FromSeconds(1));

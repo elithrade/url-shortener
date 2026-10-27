@@ -24,8 +24,10 @@ internal sealed class TokenBucket(TokenBucketOptions options, DateTimeOffset cre
                 return RateLimitResult.Allowed;
             }
 
+            var retrySeconds = (1 - _tokens) / refillRate;
+
             return RateLimitResult.Rejected(
-                TimeSpan.FromSeconds(Math.Ceiling((1 - _tokens) / refillRate))
+                TimeSpan.FromTicks((long)Math.Ceiling(retrySeconds * TimeSpan.TicksPerSecond))
             );
         }
     }

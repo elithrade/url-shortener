@@ -1088,3 +1088,8 @@ A closure object for `now` and `this`, plus a delegate, on every call, even thou
 
 Writes grow the table, use up the code space and are how spam and phishing links get in, and real users send few. Reads are most of the traffic and cheap (a primary-key lookup), and many real users share one NAT IP, so a strict per-IP `GET` limit hurts them. The `GET` risk is enumeration, and the targeted defense is limiting **404s** per client. Read load belongs to the cache or a CDN.
 </details>
+
+<details><summary>Why round <code>RetryAfter</code> up to ticks in the limiter and to whole seconds only in the filter, and why is the <code>(long)</code> cast in <code>TimeSpan.FromTicks((long)Math.Ceiling(seconds * TimeSpan.TicksPerSecond))</code> safe?</summary>
+
+`Retry-After` allows only integer seconds, but that is an HTTP rule, so it belongs in the filter. Rounding up to whole seconds in the limiter turned a 0.5 s wait into 1 s, and tests with whole-second expectations couldn't tell (the test with 2 tokens per 1 s, which expects 500 ms, can). Round **up** so that waiting `RetryAfter` really gives a token. Any positive double rounds up to at least 1 tick, so `Rejected(TimeSpan.Zero)` can't happen. The cast is safe: `Math.Ceiling` already returns a whole number, the value is > 0, and a double holds every integer exactly up to 2^53 ticks (about 28 years). Only a `Period` near `TimeSpan.MaxValue` could go past `long.MaxValue`, and an upper bound on `Period` in the options is the right guard for that.
+</details>
