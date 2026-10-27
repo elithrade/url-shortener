@@ -13,6 +13,13 @@ internal sealed class TokenBucket(TokenBucketOptions options, DateTimeOffset cre
         lock (_lock)
         {
             var elapsed = now - _lastRefill;
+
+            // received request from the pass, clamp to zero
+            if (elapsed < TimeSpan.Zero)
+            {
+                elapsed = TimeSpan.Zero;
+            }
+
             var refillRate = _options.TokenRefillPerSeconds;
 
             _tokens = Math.Min(_options.Capacity, _tokens + elapsed.TotalSeconds * refillRate);

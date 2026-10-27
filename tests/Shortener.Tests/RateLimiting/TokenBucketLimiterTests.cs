@@ -142,6 +142,35 @@ public class TokenBucketLimiterTests
     }
 
     [Fact]
+    public async Task After_a_step_back_in_time_waiting_retry_after_allows_exactly_one()
+    {
+        var now = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var clock = new ManualTimeProvider(now);
+
+        var rateLimiter = new TokenBucketLimiter(
+            new TokenBucketOptions(Capacity, 1, TimeSpan.FromSeconds(10)),
+            clock
+        );
+
+        await DrainAsync(rateLimiter, Key, Capacity);
+
+        // ntp corrects the clock back by 10 s
+        clock.UtcNow = now.AddSeconds(-10);
+        var rejected = await rateLimiter.AcquireAsync(Key);
+
+        Assert.False(rejected.IsAllowed);
+        Assert.Equal(TimeSpan.FromSeconds(10), rejected.RetryAfter);
+
+        // the client waits RetryAfter (10 s)
+        clock.UtcNow = now;
+        var allowed = await rateLimiter.AcquireAsync(Key);
+        Assert.True(allowed.IsAllowed);
+
+        // exactly one allowed, next acquire rejected
+        Assert.False((await rateLimiter.AcquireAsync(Key)).IsAllowed);
+    }
+
+    [Fact]
     public void Options_accept_boundary_values()
     {
         var options = new TokenBucketOptions(1, 1, TimeSpan.FromSeconds(1));
@@ -173,4 +202,11 @@ public class TokenBucketLimiterTests
 
         return (tokenBucketLimiter, clock);
     }
+}
+
+internal sealed class ManualTimeProvider(DateTimeOffset start) : TimeProvider
+{
+    public DateTimeOffset UtcNow { get; set; } = start;
+
+    public override DateTimeOffset GetUtcNow() => UtcNow;
 }

@@ -1074,9 +1074,9 @@ The test only asserted `IsAllowed`, so no test looked at the wait at all. The un
 Nothing about those six: an empty test is reported green. Placeholders should be `[Fact(Skip = "todo")]` (shown as skipped) or not exist yet.
 </details>
 
-<details><summary>Why can a token bucket lose or gain tokens when the server's clock is corrected backwards?</summary>
+<details><summary>Why can a token bucket lose or gain tokens when the server's clock is corrected backwards, and what should the clamp do with <code>lastRefill</code>?</summary>
 
-`GetUtcNow()` is wall-clock time. A negative `elapsed` subtracts tokens, and `lastRefill` moves back, so the next call refills the skipped interval again. Clamp a negative `elapsed` to zero (or use the monotonic `TimeProvider.GetTimestamp()`). `FakeTimeProvider` can't go backwards, so this guard is hard to test.
+`GetUtcNow()` is wall-clock time. Without a clamp, a negative `elapsed` subtracts tokens (empty bucket, 10 s back at 0.1 tokens/s gives -1 token and `RetryAfter` 20 s instead of 10 s). Clamp a negative `elapsed` to zero **and still set `lastRefill = now`**: the jump took no real time (a watch set back loses no minutes), so count from the corrected reading. Keeping the later `lastRefill` instead stalls the bucket for the size of the correction, and its `RetryAfter` lies (it still says 10 s, but waiting 10 s is rejected again). `FakeTimeProvider` can't go backwards, so the test uses a `ManualTimeProvider` with a settable `UtcNow` (`After_a_step_back_in_time_waiting_retry_after_allows_exactly_one`, which fails both without the clamp and with the stalled variant). A monotonic `TimeProvider.GetTimestamp()` would avoid the problem.
 </details>
 
 <details><summary><code>_buckets.GetOrAdd(key, _ => new TokenBucket(_options, now))</code> runs on every request. What does it allocate when the key already exists?</summary>
