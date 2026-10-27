@@ -11,16 +11,11 @@ public sealed class TokenBucketLimiter(TokenBucketOptions options, TimeProvider 
     private readonly TimeProvider _clock = clock ?? throw new ArgumentNullException(nameof(clock));
     private readonly ConcurrentDictionary<string, TokenBucket> _buckets = new();
 
-    public RateLimitResult Acquire(string key)
+    public ValueTask<RateLimitResult> AcquireAsync(string key, CancellationToken ct = default)
     {
         var now = _clock.GetUtcNow();
         var bucket = _buckets.GetOrAdd(key, _ => new TokenBucket(_options, now));
 
-        return bucket.TryTake(now);
-    }
-
-    public ValueTask<RateLimitResult> AcquireAsync(string key, CancellationToken ct = default)
-    {
-        return ValueTask.FromResult(Acquire(key));
+        return ValueTask.FromResult(bucket.TryTake(now));
     }
 }
