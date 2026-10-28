@@ -7,12 +7,12 @@ using Microsoft.Extensions.Time.Testing;
 
 namespace Shortener.Tests;
 
-public class ShortenEndpointTests : IClassFixture<WebApplicationFactory<Program>>
+public class ShortenEndpointTests : IClassFixture<GenerousRateLimitFactory>
 {
     private readonly HttpClient _client;
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly GenerousRateLimitFactory _factory;
 
-    public ShortenEndpointTests(WebApplicationFactory<Program> factory)
+    public ShortenEndpointTests(GenerousRateLimitFactory factory)
     {
         _factory = factory;
         _client = factory.CreateClient(

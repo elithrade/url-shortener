@@ -8,6 +8,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 bool usePostgres = RegisterStorage(builder);
 
+RegisterRateLimiter(builder);
+
 var app = builder.Build();
 StartupLog.UsingStorage(app.Logger, usePostgres ? "Postgres" : "InMemory");
 
@@ -16,7 +18,7 @@ if (args.Length > 0 && args[0] == "migrate")
     return await RunMigrationAsync(app, usePostgres);
 }
 
-app.MapPost("/shorten", HandlePost);
+app.MapPost("/shorten", HandlePost).AddEndpointFilter<RateLimitFilter>();
 app.MapGet("/{code}", HandleGet);
 
 app.Run();
@@ -66,6 +68,22 @@ static bool RegisterStorage(WebApplicationBuilder builder)
     builder.Services.AddHostedService<ExpirySweepService>();
 
     return usePostgres;
+}
+
+static void RegisterRateLimiter(WebApplicationBuilder builder)
+{
+    var capacity = builder.Configuration.GetValue("RateLimit:Capacity", 5);
+    var tokensPerPeriod = builder.Configuration.GetValue("RateLimit:TokensPerPeriod", 1);
+    var periodSeconds = builder.Configuration.GetValue("RateLimit:PeriodSeconds", 1);
+
+    var rateLimitOptions = new TokenBucketOptions(
+        capacity,
+        tokensPerPeriod,
+        TimeSpan.FromSeconds(periodSeconds)
+    );
+
+    builder.Services.AddSingleton(rateLimitOptions);
+    builder.Services.AddSingleton<IRateLimiter, TokenBucketLimiter>();
 }
 
 static async Task<int> RunMigrationAsync(WebApplication app, bool usePostgres)
