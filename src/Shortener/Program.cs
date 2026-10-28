@@ -5,9 +5,9 @@ const int MaxAttempts = 5;
 const int CodeLength = 7;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddSingleton(TimeProvider.System);
 
 bool usePostgres = RegisterStorage(builder);
-
 RegisterRateLimiter(builder);
 
 var app = builder.Build();
@@ -64,7 +64,6 @@ static bool RegisterStorage(WebApplicationBuilder builder)
         );
     }
 
-    builder.Services.AddSingleton(TimeProvider.System);
     builder.Services.AddHostedService<ExpirySweepService>();
 
     return usePostgres;
