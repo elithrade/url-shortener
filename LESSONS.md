@@ -349,6 +349,11 @@ The test. `Sweep()` returns how many entries it removed, and the re-added entry 
 It re-added an entry that was already expired (the old expiry time, with the clock moved on), and with the same URL. It could assert only that `TryAddAsync` returned `true`. Re-add with a future expiry and a different URL, then check `GetAsync` returns the new URL: only the new entry can produce that answer.
 </details>
 
+<details><summary>In an endpoint test, where do you register a fake service or extra middleware, and why not on the client?</summary>
+
+On the **factory**, before any client exists: `fixture.WithWebHostBuilder(b => b.ConfigureServices(s => ...))`, then `CreateClient()` from that **derived** factory. The DI container is built when the test server starts (the first `CreateClient()` or `Services`), so a client can't change services. Middleware goes in the same way, as an `IStartupFilter` registered in `ConfigureServices` (it runs before the app's pipeline). `WithWebHostBuilder` returns a new factory and leaves the original alone, so a client created from the fixture silently misses the override (seen with an echo-header filter: "header not found"). Name the constructor parameter `fixture`, not `factory`, so it can't be confused with a `_factory` field, and dispose the derived factory, because the fixture only disposes itself.
+</details>
+
 ## 7. Tooling and workflow
 
 <details><summary>Do you need <code>git mv</code> to keep history?</summary>
