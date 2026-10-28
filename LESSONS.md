@@ -211,7 +211,7 @@ Create the client with `AllowAutoRedirect = false`, assert the status first, the
 
 <details><summary>Test class lifetime in xUnit: what is setup, what is shared?</summary>
 
-A new class instance per test, so the constructor is the `[SetUp]` and `IDisposable` is the teardown. `IClassFixture<T>` is created once per class, so the app and its singleton store are shared by all tests in the class. Use unique inputs, or `WithWebHostBuilder` for a fresh host.
+A new class instance per test, so the constructor is the `[SetUp]` and `IDisposable` is the teardown. `IClassFixture<T>` is created once per class, so the app and its singletons (the store, the rate limiter's buckets) are shared by all tests in the class. Use unique inputs: unique URLs for the store, unique client IPs for the limiter (two tests posting from `1.2.3.4` shared one bucket, so the result depended on test order). Or use `WithWebHostBuilder` for a fresh host, but called in the constructor it starts one app per test (disposed only with the fixture). For fixed settings per class, a `WebApplicationFactory<Program>` subclass with `ConfigureWebHost` keeps one app.
 </details>
 
 <details><summary>You build a fake-store client, then call <code>_client.GetAsync</code> for the redirect. What happens?</summary>
