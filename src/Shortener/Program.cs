@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Shortener;
 
 const int MaxAttempts = 5;
@@ -9,6 +10,7 @@ builder.Services.AddSingleton(TimeProvider.System);
 
 bool usePostgres = RegisterStorage(builder);
 RegisterRateLimiter(builder);
+RegisterShortenerOptions(builder);
 
 var app = builder.Build();
 StartupLog.UsingStorage(app.Logger, usePostgres ? "Postgres" : "InMemory");
@@ -71,18 +73,25 @@ static bool RegisterStorage(WebApplicationBuilder builder)
 
 static void RegisterRateLimiter(WebApplicationBuilder builder)
 {
-    var capacity = builder.Configuration.GetValue("RateLimit:Capacity", 5);
-    var tokensPerPeriod = builder.Configuration.GetValue("RateLimit:TokensPerPeriod", 1);
-    var periodSeconds = builder.Configuration.GetValue("RateLimit:PeriodSeconds", 1);
+    builder
+        .Services.AddOptions<RateLimitOptions>()
+        .BindConfiguration(RateLimitOptions.Section)
+        .ValidateDataAnnotations()
+        .ValidateOnStart();
 
-    var rateLimitOptions = new TokenBucketOptions(
-        capacity,
-        tokensPerPeriod,
-        TimeSpan.FromSeconds(periodSeconds)
+    builder.Services.AddSingleton(sp =>
+        sp.GetRequiredService<IOptions<RateLimitOptions>>().Value.ToTokenBucketOptions()
     );
-
-    builder.Services.AddSingleton(rateLimitOptions);
     builder.Services.AddSingleton<IRateLimiter, TokenBucketLimiter>();
+}
+
+static void RegisterShortenerOptions(WebApplicationBuilder builder)
+{
+    builder.Services.AddSingleton<IValidateOptions<ShortenerOptions>, ShortenerOptionsValidator>();
+    builder
+        .Services.AddOptions<ShortenerOptions>()
+        .BindConfiguration(ShortenerOptions.Section)
+        .ValidateOnStart();
 }
 
 static async Task<int> RunMigrationAsync(WebApplication app, bool usePostgres)

@@ -46,12 +46,6 @@ public static class UrlValidator
             return false;
         }
 
-        if (string.IsNullOrEmpty(parsedUrl.Host))
-        {
-            error = "Url must have a host";
-            return false;
-        }
-
         if (!string.IsNullOrEmpty(parsedUrl.UserInfo))
         {
             error = "Url must not contain credentials";

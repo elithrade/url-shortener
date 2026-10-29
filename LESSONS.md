@@ -1098,3 +1098,20 @@ Writes grow the table, use up the code space and are how spam and phishing links
 
 `Retry-After` allows only integer seconds, but that is an HTTP rule, so it belongs in the filter. Rounding up to whole seconds in the limiter turned a 0.5 s wait into 1 s, and tests with whole-second expectations couldn't tell (the test with 2 tokens per 1 s, which expects 500 ms, can). Round **up** so that waiting `RetryAfter` really gives a token. Any positive double rounds up to at least 1 tick, so `Rejected(TimeSpan.Zero)` can't happen. The cast is safe: `Math.Ceiling` already returns a whole number, the value is > 0, and a double holds every integer exactly up to 2^53 ticks (about 28 years). Only a `Period` near `TimeSpan.MaxValue` could go past `long.MaxValue`, and an upper bound on `Period` in the options is the right guard for that.
 </details>
+
+## 21. Validating configuration at startup
+
+<details><summary>A chain of guard clauses (<code>if (bad) return Fail(...)</code>) keeps getting the next condition wrong. What technique helps?</summary>
+
+After each guard, write down what is now **known** to be true, because every later line only runs if the earlier checks passed. The next condition only has to handle what's left. Example for `BaseUrl`: after "has text", "parses as absolute" and "scheme is http or https", the dev rule only has to think about http: `parsedUrl.Scheme == "http" && !env.IsDevelopment()`. A first attempt, `!IsDevelopment() || Scheme != "http"`, failed https everywhere. Order matters: put the dev rule before the scheme check and it has to cover `ftp` too. A truth table of the four scheme × environment cases catches a flipped `!` or `==`.
+</details>
+
+<details><summary>Removing a check leaves the whole suite green. What are the two possible reasons, and how do you tell them apart?</summary>
+
+Either no test reaches it (add a row that does), or **no input can** reach it (delete it, or mark it as defensive). Try the inputs most likely to reach it. `if (string.IsNullOrEmpty(parsedUrl.Host))` after `Uri.TryCreate(..., Absolute)` and an http/https scheme check is unreachable: `http:///x`, `https://`, `http://:80` and `https:/example.com` all fail to parse, because `Uri` requires a host for those schemes. Found in `ShortenerOptionsValidator`, and the same check was dead in `UrlValidator`.
+</details>
+
+<details><summary>A theory row <code>ftp://example.com/path/a</code> expects a failure for the wrong scheme. Why is it a weak test?</summary>
+
+It breaks two rules, scheme and path, so with the scheme check deleted the path check still fails it and the row stays green. Each failing row should break exactly one rule (`ftp://example.com`). Similarly, `https://example.com/path/a?x=1` can't test the query rule, and `https` in Staging can't tell `!IsDevelopment()` from `IsProduction()` (use `http` in Staging).
+</details>
