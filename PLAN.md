@@ -229,7 +229,13 @@ Committed `68afdff`.
 - Endpoint tests use `StrictRateLimitFactory` and a test-only `X-Test-Client-Ip` filter, because `RemoteIpAddress` is `null` under `TestServer`
 - Details in `README.md` and `LESSONS.md` sections 6 and 20
 
-#### ⬜ Configured `BaseUrl` for the self-link check
+#### 🟡 Configured `BaseUrl` for the self-link check
+- ✅ `Shortener:BaseUrl` is bound to `ShortenerOptions` and checked at startup by `ShortenerOptionsValidator` (`ValidateOnStart`): required, absolute, http or https, https outside Development, no user info, path, query or fragment. Dev value `http://localhost:5154` in `appsettings.Development.json`
+- ✅ Theory tests for every rule (one rule broken per row), and `BaseUrlStartupTests` proving a bad value stops startup. An empty-host check was found unreachable and removed (`LESSONS.md` section 21)
+- ✅ `RateLimit:*` moved to `RateLimitOptions` (DataAnnotations, `ValidateOnStart`), defaults in `appsettings.json`, mapped to the unchanged `TokenBucketOptions`
+- ⬜ `HandlePost` compares against the configured host, not `Request.Host`. Red tests first: a forged `Host` header still gets `400`, and `shortUrl` starts with `BaseUrl`
+- ⬜ Build `shortUrl` from `BaseUrl`
+- ⬜ Compose runs as Production, so it needs `Shortener__BaseUrl` (https) before the stack starts again
 
 ## Line 1: usable and deployed (v1)
 
@@ -242,8 +248,8 @@ Committed `68afdff`.
 | 3 | ✅ Better codes | Done: `RandomNumberGenerator.GetString` replaces `Random`, and a chi-squared uniformity test passes and fails against the biased version. Known limit: no test can detect a regression to `Random`, so consider enabling analyzer CA5394 |
 | 4 | ✅ Expiry | Done: a link can have a TTL, and expired links return 404. Model, `ExpiryPolicy`, lazy check on read, handler wiring, store and policy tests, endpoint tests with a `FakeTimeProvider` (alive at lifetime minus 1 s and 404 at exactly the lifetime, for an explicit and the default lifetime, plus a boundary theory for 59, 60, 31536000 and 31536001, which also asserts the 400 body contains `31536000`; mutation-checked with `Seconds` instead of `TotalSeconds`, 4 tests failed), the sweep measurement (see above, with the decision to keep the brute-force sweep), `IExpirySweeper.Sweep()`, `ExpirySweepService` and its tests, and a test that the store and sweeper resolve to the same instance. Optional leftovers: in-place `Sweep` and logging assertions with `FakeLogger` |
 | 5 | ✅ Persistence | A Postgres `IUrlStore` (EF Core with the Npgsql provider) replaces the in-memory one. Links survive a restart, acknowledged writes are durable, and the same contract tests run against both implementations. Uniqueness comes from a primary key on the code, and expiry from an `expires_at` column that reads check against the injected `TimeProvider`, with the existing sweeper deleting expired rows. Users and auth can later use the same database. Done: the store, the contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and a Compose stack with a data volume whose restart check kept a link (see "Already done"). The Redis lab's findings feed the Line 2 cache. Optional leftovers: see "Next up" |
-| 6 | Abuse protection | Rate limiting on `POST /shorten` (done), and a configured `BaseUrl` for the self-link check |
-| 7 | Config and ops | Settings in `IOptions<T>` and env vars, a `/health` endpoint, structured logging, graceful shutdown |
+| 6 | Abuse protection | Rate limiting on `POST /shorten` (done), and a configured `BaseUrl` for the self-link check (option and startup validation done, handler still uses `Request.Host`) |
+| 7 | Config and ops | Settings in `IOptions<T>` and env vars (done for `Shortener` and `RateLimit`; `Storage` stays a pre-build read because it decides registrations), a `/health` endpoint, structured logging, graceful shutdown |
 | 8 | Ship it | Dockerfile, image built and pushed by CI, deployed to a host, post-deploy smoke test. **Decide first:** where to host and which Postgres to use (a managed service, which gives backups, or a container with a `/data` volume and scheduled `pg_dump` backups plus a tested restore). The connection string comes from configuration, and the deploy must run the `migrate` step once before the app starts (settled: EF migrations, one-shot, see "Already done"), with a database role that can alter the schema for that step only |
 
 ### Schedule
@@ -305,8 +311,8 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Start each day by re-reading yesterday's diff, and end it with a committed state plus a note on what comes next.
 
 ## Next up
-1. **Configured `BaseUrl` for the self-link check** (milestone 6, part 2). The check compares against the request's `Host` header today, which the client controls.
-2. **Milestone 7:** settings in `IOptions<T>`, a `/health` endpoint, structured logging, graceful shutdown.
+1. **Use `BaseUrl` in `HandlePost`** (milestone 6, part 2). Red endpoint tests first (forged `Host` header, `shortUrl` from `BaseUrl`), then pass `IOptions<ShortenerOptions>` to the handler. Decide whether to parse the URL once or per request, and how to join base and code (with or without a trailing slash).
+2. **Milestone 7:** a `/health` endpoint, structured logging, graceful shutdown (options are mostly done).
 3. **Milestone 8:** decide the host and the Postgres option first (see the milestone table and "Deployment shape").
 
 ## Open items (not scheduled)
