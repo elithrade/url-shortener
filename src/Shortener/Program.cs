@@ -111,15 +111,17 @@ static async Task<IResult> HandlePost(
     ShortenedUrlRequest urlRequest,
     TimeProvider clock,
     IUrlStore store,
-    HttpContext ctx,
+    IOptions<ShortenerOptions> options,
     ILogger<Program> logger,
     CancellationToken ct
 )
 {
+    var baseUrl = new Uri(options.Value.BaseUrl!);
+
     if (
         !UrlValidator.TryValidate(
             urlRequest.Url,
-            ctx.Request.Host.Host,
+            baseUrl.Host,
             out Uri? validatedUrl,
             out string? error
         )
@@ -154,13 +156,13 @@ static async Task<IResult> HandlePost(
         catch (StorageUnavailableException ex)
         {
             HandlerLog.StorageUnavailable(logger, ex);
+
             return Results.StatusCode(503);
         }
 
         if (added)
         {
-            var request = ctx.Request;
-            var shortUrl = $"{request.Scheme}://{request.Host}/{code}";
+            var shortUrl = new Uri(baseUrl, code).AbsoluteUri;
 
             return Results.Created(shortUrl, new ShortenResponse(code, shortUrl));
         }
