@@ -111,7 +111,8 @@ The stored URL is the canonical form (`Uri.AbsoluteUri`): the scheme and host ar
 `-i` shows the status line and headers. Leave `-L` off, so you see the 302 itself and not the destination page.
 
 ```bash
-BASE=http://localhost:5154
+BASE=http://localhost:5154    # dotnet run (launchSettings.json)
+# BASE=http://localhost:8080  # docker compose: the app listens on 8080 in its container, published as 8080:8080
 
 # 1. Create a link: expect 201, with code and shortUrl in the body
 curl -i -X POST $BASE/shorten \
@@ -124,19 +125,19 @@ curl -i $BASE/<code>
 # 3. Unknown code: expect 404
 curl -i $BASE/nope
 
-# 4. Missing url: expect 400 "Url is required"
+# 4. Missing URL: expect 400 "URL is required"
 curl -i -X POST $BASE/shorten \
   -H "Content-Type: application/json" \
   -d '{}'
 
-# 5. Whitespace url: expect 400 "Url is required"
+# 5. Whitespace URL: expect 400 "URL is required"
 curl -i -X POST $BASE/shorten \
   -H "Content-Type: application/json" \
   -d '{"url":"   "}'
 
-# 6. Invalid urls: expect 400 with a message for each rule
+# 6. Invalid URLs: expect 400 with a message for each rule
 for u in 'foo' 'javascript:alert(1)' 'file:///etc/passwd' '/etc/passwd' 'http://' \
-         'https://google.com@evil.com' 'http://localhost:5154/abc'; do
+         'https://google.com@evil.com' "$BASE/abc"; do
   curl -s -w " -> %{http_code}\n" -X POST $BASE/shorten \
     -H "Content-Type: application/json" \
     -d "{\"url\":\"$u\"}"
@@ -160,6 +161,15 @@ for s in -5 0 59 31536001; do
     -H "Content-Type: application/json" \
     -d "{\"url\":\"https://example.com\",\"expiresInSeconds\":$s}"
 done
+
+# 10. Forged Host header: shortUrl still starts with $BASE (from Shortener:BaseUrl),
+#     and a link to this service is still rejected with 400
+curl -i -X POST $BASE/shorten -H "Host: evil.example" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/forged"}'
+curl -s -w " -> %{http_code}\n" -X POST $BASE/shorten -H "Host: evil.example" \
+  -H "Content-Type: application/json" \
+  -d "{\"url\":\"$BASE/abc\"}"
 ```
 
 ### Collision test

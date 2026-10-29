@@ -152,7 +152,7 @@ No. They are compile-time hints. The serializer builds the record by reflection 
 
 <details><summary>What should an error message say, and what must it not say?</summary>
 
-It should state the rule the client must meet ("Url must not contain credentials"). It must not leak internals (library names, blocklists, hosts) or echo user input. Ask: "would this be in the API docs?"
+It should state the rule the client must meet ("URL must not contain credentials"). It must not leak internals (library names, blocklists, hosts) or echo user input. Ask: "would this be in the API docs?"
 </details>
 
 ## 5. C# language and framework

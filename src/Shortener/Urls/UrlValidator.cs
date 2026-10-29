@@ -18,43 +18,43 @@ public static class UrlValidator
 
         if (string.IsNullOrWhiteSpace(input))
         {
-            error = "Url is required";
+            error = "URL is required";
             return false;
         }
 
         if (input.Length > MAX_LENGTH)
         {
-            error = $"Url is too long, maximum length is {MAX_LENGTH}";
+            error = $"URL is too long, maximum length is {MAX_LENGTH}";
             return false;
         }
 
         if (!Uri.TryCreate(input, UriKind.Absolute, out Uri? parsedUrl))
         {
-            error = "Url must be valid and absolute";
+            error = "URL must be valid and absolute";
             return false;
         }
 
         if (parsedUrl.AbsoluteUri.Length > MAX_LENGTH)
         {
-            error = $"Encoded url length is too long, maximum length is {MAX_LENGTH}";
+            error = $"Encoded URL length is too long, maximum length is {MAX_LENGTH}";
             return false;
         }
 
         if (parsedUrl.Scheme != "http" && parsedUrl.Scheme != "https")
         {
-            error = "Invalid url scheme, only http or https allowed";
+            error = "URL scheme must be http or https";
             return false;
         }
 
         if (!string.IsNullOrEmpty(parsedUrl.UserInfo))
         {
-            error = "Url must not contain credentials";
+            error = "URL must not contain credentials";
             return false;
         }
 
         if (parsedUrl.Host.Equals(ownHost, StringComparison.OrdinalIgnoreCase))
         {
-            error = "url host cannot be own host";
+            error = "URL must not point to this service's own host";
             return false;
         }
 

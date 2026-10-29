@@ -118,7 +118,7 @@ public class UrlValidatorTests
         Assert.False(Validate(baseUrl + rest, out var uri, out var error));
         Assert.Null(uri);
         Assert.NotNull(error);
-        Assert.Contains("Encoded url length is too long", error);
+        Assert.Contains("Encoded URL length is too long", error);
     }
 
     [Fact]
@@ -152,7 +152,7 @@ public class UrlValidatorTests
         Assert.False(Validate(input, out var uri, out var error));
         Assert.Null(uri);
         Assert.NotNull(error);
-        Assert.Contains("Encoded url length is too long", error);
+        Assert.Contains("Encoded URL length is too long", error);
     }
 
     [Theory]

@@ -20,7 +20,7 @@ public sealed class ShortenerOptionsValidator(IHostEnvironment env)
 
         if (!Uri.TryCreate(input, UriKind.Absolute, out Uri? parsedUrl))
         {
-            return ValidateOptionsResult.Fail($"{Key} must be a valid absolute url");
+            return ValidateOptionsResult.Fail($"{Key} must be a valid absolute URL");
         }
 
         if (parsedUrl.Scheme != "http" && parsedUrl.Scheme != "https")

@@ -29,7 +29,11 @@ services:
     build: .
     ports:
       - "8080:8080"
-    environment: *app-env
+    environment:
+      <<: *app-env
+      # local stack only: Development allows an http BaseUrl (milestone 8 brings https)
+      ASPNETCORE_ENVIRONMENT: Development
+      Shortener__BaseUrl: http://localhost:8080
     depends_on:
       migrate:
         condition: service_completed_successfully
