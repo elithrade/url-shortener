@@ -1044,6 +1044,11 @@ A refused connection gives an unreachable database with no Docker and without st
 `WebApplicationFactory` runs in Development, so an unhandled exception gets the developer exception page, which prints the exception, its inner exceptions and the stack trace (the failure showed `OperationException: secret:1234`). That is the framework's behavior, not the app's. The 500 tests assert only the status. The leak check belongs in the 503 tests, where the handler writes the response, and it is only meaningful if it can fail: returning `ex.InnerException?.Message` in the body made it fail. Put the secret in the inner exception's message (and the outer one) to cover both. In production, never run with the Development environment, or these messages reach clients.
 </details>
 
+<details><summary>What is a captive dependency, why does the container only catch it in Development, and how does a singleton use a <code>DbContext</code> safely?</summary>
+
+A singleton's constructor runs once, so a scoped (or transient) service it takes is captured: one instance for the app's lifetime, shared by every request and never disposed. For a `DbContext` that means concurrent use of a non-thread-safe object and a connection that stays open. `ValidateScopes` throws "Cannot consume scoped service ... from singleton ..." at startup, but it is on only in Development, so in Production the bug runs silently. The other direction (scoped or transient taking a singleton) is fine. Fix: inject a factory, which is a singleton (`IDbContextFactory<T>`, `IServiceScopeFactory`, `IHttpClientFactory`), and create the short-lived object per operation: `await using var db = await factory.CreateDbContextAsync(ct)`. Dispose what you create, never what you're given: wrapping an injected context in `using` disposes the container's instance, and the next call gets `ObjectDisposedException`. `PostgresUrlStore` (singleton) and `ExpirySweepService` (hosted, so singleton) follow this.
+</details>
+
 ## 19. URL validation: input length versus canonical length
 
 <details><summary>The validator limits the input to 2,048 characters, but the store keeps <code>AbsoluteUri</code>. Is that enough for a <code>varchar(2048)</code> column?</summary>
