@@ -7,12 +7,14 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It'
 ## Features (current)
 - `POST /shorten` validates the URL and returns a random 7-character base62 code, generated with `RandomNumberGenerator` (unbiased and unguessable).
 - URL validation (`UrlValidator`): absolute `http`/`https` only, at most 2048 characters, no embedded credentials, and no links back to the service's own host.
+- The service's public address comes from `Shortener:BaseUrl`, never from the request's `Host` header (which the client controls). It is used for the self-link check and to build `shortUrl`. It is checked at startup, and the app refuses to start without a valid one: absolute, `https` (or `http` in Development only), no path, query, fragment or user info. Development uses `http://localhost:5154` from `appsettings.Development.json`.
 - Expiry: every link expires. The client may send `expiresInSeconds` (60 to 31,536,000), and the default is 30 days. An expired link behaves exactly like an unknown one (`404`).
 - `GET /{code}` redirects to the stored URL with `302 Found`, or returns `404` if the code is unknown or expired.
 - Two stores behind the `IUrlStore` interface, chosen by the `Storage` setting: `InMemory` (the default; a `Dictionary` guarded by a `Lock`) and `Postgres` (EF Core with Npgsql, where uniqueness comes from the primary key on the code and links are kept in the database). Entries are `LinkEntry(Url, ExpiresAt)`, and the expiry is checked on every read against an injected `TimeProvider`.
 - Bounded retry on code collisions: up to 5 attempts, then `503`.
 - Rate limiting on `POST /shorten`: a token bucket per client IP (IPv6 reduced to its /64), with a burst of 5 and 1 more request per second by default. Over the limit, the response is `429` with `Retry-After` in whole seconds. `GET /{code}` is not limited.
 - A storage outage returns `503` (not retried, and with no details in the response). Other unexpected errors stay `500`.
+- Health endpoints: `GET /health/live` runs no checks (the process answers), and `GET /health/ready` checks the dependencies (with Postgres, that the database accepts a connection, bounded to 2 seconds; always healthy with the in-memory store). Both return `200` (`Healthy`) or `503` (`Unhealthy`) and are not rate-limited.
 - Both stores implement `IExpirySweeper.SweepAsync()`, which removes expired entries (the Postgres store with one `DELETE`) and is tested. `ExpirySweepService` (a `BackgroundService` with a `PeriodicTimer`) calls it every 60 seconds, so expired entries are freed shortly after they expire (they are never served in the meantime, because reads check the expiry).
 
 ## Run
@@ -42,7 +44,7 @@ docker compose up -d --wait
 curl -i -X POST http://localhost:8080/shorten -H "Content-Type: application/json" -d '{"url":"https://example.com"}'
 docker compose down        # keeps the volume, so links survive; add -v to delete the data
 ```
-The password is only read when Postgres first creates its data directory, so changing it later needs `docker compose down -v`. The app listens on `8080` in the container.
+The password is only read when Postgres first creates its data directory, so changing it later needs `docker compose down -v`. The app listens on `8080` in the container. The Compose app runs as Development with `Shortener__BaseUrl=http://localhost:8080`, because Development is the only environment that accepts an `http` base URL. `appsettings*.json` is baked into the image, so a change there needs `docker compose up -d --build`; a change to `environment:` in `compose.yaml` only needs `docker compose up -d`.
 
 To add a migration after changing the model: `dotnet tool restore`, then `dotnet tool run dotnet-ef migrations add <Name> --project src/Shortener --output-dir Storage/Postgres/Migrations`, and change the generated namespace to `Shortener`.
 
@@ -219,7 +221,7 @@ The detailed plan, with the current milestone and status, is in `PLAN.md`. In sh
 1. ~~URL validation~~, ~~endpoint and concurrency tests~~, ~~CI~~, ~~cryptographic codes~~ (done)
 2. Expiry: done (model, policy, read-time check, the measured store sweep, and the background service that runs it).
 3. Persistence behind `IUrlStore`: done for Postgres (the store, shared contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and Docker Compose with a data volume, checked by restarting the stack). Redis is planned later as a cache in front of it.
-4. Rate limiting: done for `POST /shorten` (a configured `BaseUrl` for the self-link check is next). Then configuration through `IOptions<T>`, a health endpoint, structured logging, graceful shutdown.
+4. Abuse protection: done (rate limiting on `POST /shorten`, and a configured `BaseUrl` validated at startup). Config and ops: settings through `IOptions<T>` and the health endpoints are done; structured logging and graceful shutdown are next.
 5. Deployment (the Dockerfile exists; CI image build and push, a host, and a post-deploy smoke test are left).
 6. Async click counting with `Channel<T>`, caching, multi-instance design (shared store and ID allocation), load testing and failure injection.
 7. A UI.

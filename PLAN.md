@@ -237,6 +237,21 @@ Committed `68afdff`.
 - ✅ Compose: the `app` service runs as Development with `Shortener__BaseUrl=http://localhost:8080` (Development allows http). Checked: `shortUrl` was `http://localhost:8080/...`. Milestone 8 replaces this with an https name
 - ✅ Error messages say "URL" in prose (identifiers stay `Url`). The dead empty-host check was removed from `UrlValidator` too
 
+### 🟡 Milestone 7: config and ops
+
+#### ✅ Settings through `IOptions<T>`
+- `ShortenerOptions` and `RateLimitOptions` (see milestone 6). `Storage` stays a pre-build read because it decides the registrations
+
+#### ✅ Health endpoints
+- `/health/live` runs no checks; `/health/ready` runs the checks tagged `ready`: `PostgresHealthCheck` (`CanConnectAsync`, registered only with Postgres, `timeout:` 2 s). Not rate-limited
+- Endpoint tests: live and ready `200` with the in-memory store, live `200` and ready `503` with an unreachable Postgres (port 1), ready `200` against the Testcontainers Postgres
+- Checked by hand with Compose: `docker compose stop postgres` gave live `200` and ready `503` (6 ms); `docker compose pause postgres` took 15 s until `.WaitAsync(ct)` enforced the timeout (then 2.1 s). See `LESSONS.md` section 22
+- Decided: `CanConnectAsync` only, no table query per probe. A missing schema is a deploy-time problem (see the open item on failing fast)
+
+#### ⬜ Structured logging
+
+#### ⬜ Graceful shutdown
+
 ## Line 1: usable and deployed (v1)
 
 **Definition of done:** the service runs at a public URL, survives a restart without losing data, rejects abusive input, has green CI that deploys on merge to `main`, and the README explains how to run, test and deploy it.
@@ -249,7 +264,7 @@ Committed `68afdff`.
 | 4 | ✅ Expiry | Done: a link can have a TTL, and expired links return 404. Model, `ExpiryPolicy`, lazy check on read, handler wiring, store and policy tests, endpoint tests with a `FakeTimeProvider` (alive at lifetime minus 1 s and 404 at exactly the lifetime, for an explicit and the default lifetime, plus a boundary theory for 59, 60, 31536000 and 31536001, which also asserts the 400 body contains `31536000`; mutation-checked with `Seconds` instead of `TotalSeconds`, 4 tests failed), the sweep measurement (see above, with the decision to keep the brute-force sweep), `IExpirySweeper.Sweep()`, `ExpirySweepService` and its tests, and a test that the store and sweeper resolve to the same instance. Optional leftovers: in-place `Sweep` and logging assertions with `FakeLogger` |
 | 5 | ✅ Persistence | A Postgres `IUrlStore` (EF Core with the Npgsql provider) replaces the in-memory one. Links survive a restart, acknowledged writes are durable, and the same contract tests run against both implementations. Uniqueness comes from a primary key on the code, and expiry from an `expires_at` column that reads check against the injected `TimeProvider`, with the existing sweeper deleting expired rows. Users and auth can later use the same database. Done: the store, the contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and a Compose stack with a data volume whose restart check kept a link (see "Already done"). The Redis lab's findings feed the Line 2 cache. Optional leftovers: see "Next up" |
 | 6 | ✅ Abuse protection | Done: rate limiting on `POST /shorten`, and a configured `BaseUrl`, validated at startup, for the self-link check and `shortUrl`. Optional leftover: `AllowedHosts` set to the real host in milestone 8 |
-| 7 | Config and ops | Settings in `IOptions<T>` and env vars (done for `Shortener` and `RateLimit`; `Storage` stays a pre-build read because it decides registrations), a `/health` endpoint, structured logging, graceful shutdown |
+| 7 | Config and ops | Settings in `IOptions<T>` and env vars (done for `Shortener` and `RateLimit`; `Storage` stays a pre-build read because it decides registrations), `/health/live` and `/health/ready` (done), structured logging, graceful shutdown |
 | 8 | Ship it | Dockerfile, image built and pushed by CI, deployed to a host, post-deploy smoke test. **Decide first:** where to host and which Postgres to use (a managed service, which gives backups, or a container with a `/data` volume and scheduled `pg_dump` backups plus a tested restore). The connection string comes from configuration, and the deploy must run the `migrate` step once before the app starts (settled: EF migrations, one-shot, see "Already done"), with a database role that can alter the schema for that step only |
 
 ### Schedule
@@ -311,7 +326,7 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Start each day by re-reading yesterday's diff, and end it with a committed state plus a note on what comes next.
 
 ## Next up
-1. **Milestone 7:** a `/health` endpoint, structured logging, graceful shutdown (options are mostly done).
+1. **Milestone 7:** graceful shutdown (check what happens on SIGTERM to in-flight requests and the sweeper), then structured logging (JSON output for containers). Options and health endpoints are done.
 2. **Milestone 8:** decide the host and the Postgres option first (see the milestone table and "Deployment shape").
 
 ## Open items (not scheduled)
@@ -324,7 +339,8 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Behind a proxy: `ForwardedHeaders` with trusted proxies (milestone 8).
 
 **Persistence**
-- Decide what a normal start does when the schema is missing: fail fast (for example via `GetPendingMigrationsAsync`) or keep the `500` on the first request.
+- Decide what a normal start does when the schema is missing: fail fast (for example via `GetPendingMigrationsAsync`) or keep the `500` on the first request. Readiness does not catch it: `CanConnectAsync` only proves the server accepts a connection.
+- Npgsql's connection `Timeout` is 15 s by default, so real requests also wait up to 15 s when the database hangs. Consider a lower `Timeout` in the connection string (milestone 8).
 - Build the shared test fixture's database with `SchemaMigrator` instead of `EnsureCreatedAsync`, so tests use the production schema path.
 - The `57P01` test from the storage-outage entry.
 - A `CancellationToken` for `SchemaMigrator`.

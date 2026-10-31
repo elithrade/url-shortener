@@ -1120,3 +1120,20 @@ Either no test reaches it (add a row that does), or **no input can** reach it (d
 
 It breaks two rules, scheme and path, so with the scheme check deleted the path check still fails it and the row stays green. Each failing row should break exactly one rule (`ftp://example.com`). Similarly, `https://example.com/path/a?x=1` can't test the query rule, and `https` in Staging can't tell `!IsDevelopment()` from `IsProduction()` (use `http` in Staging).
 </details>
+
+## 22. Health checks
+
+<details><summary>Why two endpoints, <code>/health/live</code> and <code>/health/ready</code>, and which one may check the database?</summary>
+
+Liveness asks "is the process OK?", and a failure makes the platform **restart** the container. Readiness asks "can it serve traffic now?", and a failure makes the platform **stop sending traffic** without restarting. Only readiness may check dependencies: a database check on liveness turns a database outage into a restart loop of every app instance, which can't fix the database. Here `/health/live` runs no checks (`Predicate = _ => false`) and `/health/ready` runs the checks tagged `ready` (only the Postgres check, and none with the in-memory store). Verified with Compose: Postgres stopped gave live `200` and ready `503`. Keep health endpoints off the per-IP rate limiter (the platform's prober is one IP and would get `429`, and the limiter's buckets are shared with `POST /shorten`); guard readiness by not exposing it publicly and keeping the check cheap.
+</details>
+
+<details><summary>The Postgres check is registered with <code>timeout: 2 s</code>, but with the database paused (<code>docker compose pause postgres</code>) the probe took 15 s. Why, and what fixed it?</summary>
+
+The `timeout:` only **cancels the token** passed to the check; the health service then still waits for the check to return. `CanConnectAsync(ct)` got the token, but with a frozen server the TCP connect still succeeds (the kernel accepts it) and Npgsql waits for the login reply without reacting to cancellation, until its own connection `Timeout` (15 s by default). The log said `completed after 15000.8794ms` with the check's own "Unable to connect" message, because `CanConnectAsync` returned `false` instead of throwing. A token is a request, not a guarantee. Fix: `await db.Database.CanConnectAsync(ct).WaitAsync(ct)`. `WaitAsync` stops **waiting** when the token is cancelled (the abandoned connect still runs in the background until its 15 s). After the fix: `503` in 2.1 s and `threw an unhandled exception after 2005.6486ms`, which the health service reports as Unhealthy. `docker compose stop` (a clean shutdown) never showed the problem, since closed connections fail at once (6 ms). A lower `Timeout` in the connection string would also bound it, but for every connection in the app.
+</details>
+
+<details><summary>A health check that only throws <code>NotImplementedException</code> makes the "unreachable → 503" test pass. What does that tell you about the tests?</summary>
+
+The health service catches exceptions from a check and reports Unhealthy, so a broken or always-failing check passes any "expect 503" test. The "reachable → 200" test is what forces the check to really distinguish the two cases. Test both directions; one alone proves little.
+</details>
