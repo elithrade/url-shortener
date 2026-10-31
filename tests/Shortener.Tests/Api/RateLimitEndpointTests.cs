@@ -7,11 +7,9 @@ namespace Shortener.Tests;
 public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
 {
     private readonly HttpClient _client;
-    private readonly WebApplicationFactory<Program> _factory;
 
     public RateLimitEndpointTests(StrictRateLimitFactory factory)
     {
-        _factory = factory;
         _client = factory.CreateClient(
             new WebApplicationFactoryClientOptions
             {

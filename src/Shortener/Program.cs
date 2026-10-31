@@ -1,9 +1,12 @@
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Shortener;
 
 const int MaxAttempts = 5;
 const int CodeLength = 7;
+const string ReadyTag = "ready";
+const int DbHealthCheckTimeoutSeconds = 2;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton(TimeProvider.System);
@@ -11,6 +14,7 @@ builder.Services.AddSingleton(TimeProvider.System);
 bool usePostgres = RegisterStorage(builder);
 RegisterRateLimiter(builder);
 RegisterShortenerOptions(builder);
+RegisterHealthChecks(builder, usePostgres);
 
 var app = builder.Build();
 StartupLog.UsingStorage(app.Logger, usePostgres ? "Postgres" : "InMemory");
@@ -22,6 +26,15 @@ if (args.Length > 0 && args[0] == "migrate")
 
 app.MapPost("/shorten", HandlePost).AddEndpointFilter<RateLimitFilter>();
 app.MapGet("/{code}", HandleGet);
+
+// liveness runs no checks: it only proves the process can answer
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+
+// readiness runs the dependency checks tagged "ready" (none with the in-memory store)
+app.MapHealthChecks(
+    "/health/ready",
+    new HealthCheckOptions { Predicate = check => check.Tags.Contains(ReadyTag) }
+);
 
 app.Run();
 
@@ -92,6 +105,20 @@ static void RegisterShortenerOptions(WebApplicationBuilder builder)
         .Services.AddOptions<ShortenerOptions>()
         .BindConfiguration(ShortenerOptions.Section)
         .ValidateOnStart();
+}
+
+static void RegisterHealthChecks(WebApplicationBuilder builder, bool usePostgres)
+{
+    var checks = builder.Services.AddHealthChecks();
+
+    if (usePostgres)
+    {
+        checks.AddCheck<PostgresHealthCheck>(
+            "postgres",
+            tags: [ReadyTag],
+            timeout: TimeSpan.FromSeconds(DbHealthCheckTimeoutSeconds)
+        );
+    }
 }
 
 static async Task<int> RunMigrationAsync(WebApplication app, bool usePostgres)
