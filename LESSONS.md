@@ -1154,3 +1154,20 @@ Three deadlines in the wrong order: Npgsql's connect `Timeout` 15 s, .NET `Shutd
 
 A configured timeout is not the time to failure. Measured: command timeout 5 s → `503` after 11.17 s, 3 s → 9.18 s, so about the timeout + 6 s on a connection taken from the pool (the source of the 6 s inside Npgsql was not found; `CancellationTimeout = -1` didn't change it). A new connection fails at the connect timeout (3.04 s). Measure the worst case of each path under a realistic failure (`docker compose pause`, not `stop`, which closes connections at once) and budget the outer layers for the measured number.
 </details>
+
+## 24. Structured logging
+
+<details><summary>The code already logs with <code>LoggerMessage</code> and named placeholders. What does "structured logging" still add in a container?</summary>
+
+The placeholders keep properties (`{Storage}`), but the default console formatter prints them as multi-line text, and a collector reading stdout line by line splits a stack trace into dozens of unrelated entries. The JSON formatter writes one object per line with the properties, level, category and exception as fields, and `IncludeScopes` adds the request's `TraceId` to every entry. Keep the format in configuration and log only through `ILogger`, so a later exporter (App Insights via OpenTelemetry) gets the same entries with no code change.
+</details>
+
+<details><summary>A privacy test sent <code>{"url":"https://example.com/p?token=SECRET"}</code> to <code>POST /shorten</code> and asserted no log entry contained <code>SECRET</code>. Why could it not catch the likely leak?</summary>
+
+The secret was only in the body, which is logged only if someone adds `HttpLoggingFields.RequestBody`. The likely regression is adding `RequestQuery`, and no request in the test had a query string. Adding `GET /nope?x=SECRET2` made the mutation (`| HttpLoggingFields.RequestQuery`) turn the test red. Also assert the POST status first: if it returned `404` or `429`, the handler never ran and the test would pass while testing nothing.
+</details>
+
+<details><summary>In a logging test, why assert both the response status and the <code>StatusCode</code> in the log?</summary>
+
+They answer different questions. The response status is a precondition (did the scenario happen?); if it fails, the setup broke, not the logging. The logged status is the behavior under test. The two can disagree, for example when the logging middleware sits where a later handler rewrites the response, so the log claims `200` while the client got `500`. `Assert.Equal(((int)response.StatusCode).ToString(), log.GetStructuredStateValue("StatusCode"))` states "the log records what the client received". `FakeLogRecord` stores property values as strings, and `GetSnapshot()` is a copy, so take it after the requests.
+</details>

@@ -237,7 +237,7 @@ Committed `68afdff`.
 - ✅ Compose: the `app` service runs as Development with `Shortener__BaseUrl=http://localhost:8080` (Development allows http). Checked: `shortUrl` was `http://localhost:8080/...`. Milestone 8 replaces this with an https name
 - ✅ Error messages say "URL" in prose (identifiers stay `Url`). The dead empty-host check was removed from `UrlValidator` too
 
-### 🟡 Milestone 7: config and ops
+### ✅ Milestone 7: config and ops
 
 #### ✅ Settings through `IOptions<T>`
 - `ShortenerOptions` and `RateLimitOptions` (see milestone 6). `Storage` stays a pre-build read because it decides the registrations
@@ -248,7 +248,11 @@ Committed `68afdff`.
 - Checked by hand with Compose: `docker compose stop postgres` gave live `200` and ready `503` (6 ms); `docker compose pause postgres` took 15 s until `.WaitAsync(ct)` enforced the timeout (then 2.1 s). See `LESSONS.md` section 22
 - Decided: `CanConnectAsync` only, no table query per probe. A missing schema is a deploy-time problem (see the open item on failing fast)
 
-#### ⬜ Structured logging
+#### ✅ Structured logging
+- Console output as one JSON object per line (`appsettings.json`: `FormatterName: json`, scopes, UTC timestamps), so a stack trace stays one entry and properties stay searchable. `appsettings.Development.json` keeps the readable `simple` format for `dotnet run`; the Compose app sets JSON with `Logging__Console__FormatterName`
+- One request line per request (`AddHttpLogging`, `CombineLogs`): method, path, status, duration, with the `TraceId` in scopes. No query string, headers or bodies, because shortened URLs can carry tokens. `/health/*` is skipped (`UseWhen`). EF Core command logs at `Warning` outside Development
+- Tests with `FakeLogger` (`Microsoft.Extensions.Diagnostics.Testing` 10.11.0): one request line with path and status, no secret from the body or the query string in any log entry, no `/health` lines. Mutation-checked: adding `RequestQuery`, removing the `UseWhen` and removing `CombineLogs` each turned exactly one test red
+- Later (milestone 8): App Insights through the Azure Monitor OpenTelemetry package; the `ILogger` code stays as it is
 
 #### ✅ Graceful shutdown
 - Deadline budget, shrinking inward (constants in `Program.cs`): Npgsql connect `Timeout` 3 s and `CommandTimeout` 3 s (set in code, whatever the connection string says), `HostOptions.ShutdownTimeout` 12 s, Compose `stop_grace_period` 15 s. `SchemaMigrator` overrides the command timeout to 5 minutes, because migrations can run longer than a request (not covered by a test)
@@ -267,7 +271,7 @@ Committed `68afdff`.
 | 4 | ✅ Expiry | Done: a link can have a TTL, and expired links return 404. Model, `ExpiryPolicy`, lazy check on read, handler wiring, store and policy tests, endpoint tests with a `FakeTimeProvider` (alive at lifetime minus 1 s and 404 at exactly the lifetime, for an explicit and the default lifetime, plus a boundary theory for 59, 60, 31536000 and 31536001, which also asserts the 400 body contains `31536000`; mutation-checked with `Seconds` instead of `TotalSeconds`, 4 tests failed), the sweep measurement (see above, with the decision to keep the brute-force sweep), `IExpirySweeper.Sweep()`, `ExpirySweepService` and its tests, and a test that the store and sweeper resolve to the same instance. Optional leftovers: in-place `Sweep` and logging assertions with `FakeLogger` |
 | 5 | ✅ Persistence | A Postgres `IUrlStore` (EF Core with the Npgsql provider) replaces the in-memory one. Links survive a restart, acknowledged writes are durable, and the same contract tests run against both implementations. Uniqueness comes from a primary key on the code, and expiry from an `expires_at` column that reads check against the injected `TimeProvider`, with the existing sweeper deleting expired rows. Users and auth can later use the same database. Done: the store, the contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and a Compose stack with a data volume whose restart check kept a link (see "Already done"). The Redis lab's findings feed the Line 2 cache. Optional leftovers: see "Next up" |
 | 6 | ✅ Abuse protection | Done: rate limiting on `POST /shorten`, and a configured `BaseUrl`, validated at startup, for the self-link check and `shortUrl`. Optional leftover: `AllowedHosts` set to the real host in milestone 8 |
-| 7 | Config and ops | Settings in `IOptions<T>` and env vars (done for `Shortener` and `RateLimit`; `Storage` stays a pre-build read because it decides registrations), `/health/live` and `/health/ready` (done), graceful shutdown with a deadline budget (done), structured logging |
+| 7 | ✅ Config and ops | Settings in `IOptions<T>` and env vars (done for `Shortener` and `RateLimit`; `Storage` stays a pre-build read because it decides registrations), `/health/live` and `/health/ready` (done), graceful shutdown with a deadline budget (done), structured JSON logging with one line per request (done) |
 | 8 | Ship it | Dockerfile, image built and pushed by CI, deployed to a host, post-deploy smoke test. **Decide first:** where to host and which Postgres to use (a managed service, which gives backups, or a container with a `/data` volume and scheduled `pg_dump` backups plus a tested restore). The connection string comes from configuration, and the deploy must run the `migrate` step once before the app starts (settled: EF migrations, one-shot, see "Already done"), with a database role that can alter the schema for that step only |
 
 ### Schedule
@@ -329,8 +333,7 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Start each day by re-reading yesterday's diff, and end it with a committed state plus a note on what comes next.
 
 ## Next up
-1. **Milestone 7:** structured logging (JSON output for containers, what to log per request). Options, health endpoints and graceful shutdown are done.
-2. **Milestone 8:** decide the host and the Postgres option first (see the milestone table and "Deployment shape").
+1. **Milestone 8:** decide the host and the Postgres option first (see the milestone table and "Deployment shape").
 
 ## Open items (not scheduled)
 **Rate limiting**

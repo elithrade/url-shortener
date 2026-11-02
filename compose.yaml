@@ -36,6 +36,8 @@ services:
       # local stack only: Development allows an http BaseUrl (milestone 8 brings https)
       ASPNETCORE_ENVIRONMENT: Development
       Shortener__BaseUrl: http://localhost:8080
+      # containers log one JSON object per line, even in Development
+      Logging__Console__FormatterName: json
     depends_on:
       migrate:
         condition: service_completed_successfully

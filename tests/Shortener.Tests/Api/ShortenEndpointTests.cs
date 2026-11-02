@@ -420,7 +420,10 @@ public class ShortenEndpointTests : IClassFixture<GenerousRateLimitFactory>
     [Fact]
     public async Task Self_link_with_a_forged_header_returns_400()
     {
-        var response = await PostAsync("evil.example", "http://localhost/forged-host");
+        var response = await _client.PostShortenAsync(
+            "http://localhost/forged-host",
+            host: "evil.example"
+        );
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
@@ -428,23 +431,14 @@ public class ShortenEndpointTests : IClassFixture<GenerousRateLimitFactory>
     [Fact]
     public async Task Short_url_uses_configured_base_url_not_host_header()
     {
-        var response = await PostAsync("evil.example", "http://example.com/forged-host/longpath");
+        var response = await _client.PostShortenAsync(
+            "http://example.com/forged-host/longpath",
+            host: "evil.example"
+        );
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
 
         var shortUrl = (await response.Content.ReadFromJsonAsync<ShortenResponse>())?.ShortUrl;
         Assert.StartsWith("http://localhost:5154/", shortUrl);
-    }
-
-    private async Task<HttpResponseMessage> PostAsync(string host, string url)
-    {
-        var request = new HttpRequestMessage(HttpMethod.Post, "/shorten")
-        {
-            Content = JsonContent.Create(new { url }),
-        };
-
-        request.Headers.Host = host;
-
-        return await _client.SendAsync(request);
     }
 
     private (HttpClient, FakeTimeProvider) NewFakeTimerClient(DateTimeOffset now)

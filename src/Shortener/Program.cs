@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpLogging;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -25,8 +26,15 @@ bool usePostgres = RegisterStorage(builder);
 RegisterRateLimiter(builder);
 RegisterShortenerOptions(builder);
 RegisterHealthChecks(builder, usePostgres);
+RegisterRequestLogging(builder);
 
 var app = builder.Build();
+
+// one log line per request (method, path, status, duration); health probes would only add noise
+app.UseWhen(
+    ctx => !ctx.Request.Path.StartsWithSegments("/health"),
+    branch => branch.UseHttpLogging()
+);
 StartupLog.UsingStorage(app.Logger, usePostgres ? "Postgres" : "InMemory");
 
 if (args.Length > 0 && args[0] == "migrate")
@@ -122,6 +130,20 @@ static void RegisterShortenerOptions(WebApplicationBuilder builder)
         .Services.AddOptions<ShortenerOptions>()
         .BindConfiguration(ShortenerOptions.Section)
         .ValidateOnStart();
+}
+
+static void RegisterRequestLogging(WebApplicationBuilder builder)
+{
+    // no query string, headers or bodies: the URLs users shorten can carry tokens or personal data
+    builder.Services.AddHttpLogging(o =>
+    {
+        o.LoggingFields =
+            HttpLoggingFields.RequestMethod
+            | HttpLoggingFields.RequestPath
+            | HttpLoggingFields.ResponseStatusCode
+            | HttpLoggingFields.Duration;
+        o.CombineLogs = true;
+    });
 }
 
 static void RegisterHealthChecks(WebApplicationBuilder builder, bool usePostgres)
