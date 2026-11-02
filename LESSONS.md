@@ -1137,3 +1137,20 @@ The `timeout:` only **cancels the token** passed to the check; the health servic
 
 The health service catches exceptions from a check and reports Unhealthy, so a broken or always-failing check passes any "expect 503" test. The "reachable → 200" test is what forces the check to really distinguish the two cases. Test both directions; one alone proves little.
 </details>
+
+## 23. Graceful shutdown and the deadline budget
+
+<details><summary>What happens when a container is stopped, and what do exit codes 0, 143 and 137 mean?</summary>
+
+The platform stops routing traffic, then sends SIGTERM to PID 1. The ASP.NET Core host fires `ApplicationStopping`, Kestrel stops accepting connections and waits for requests in progress, hosted services get their `stoppingToken` cancelled, the DI container is disposed, and the process exits `0`. If the grace period runs out first (Compose 10 s, Kubernetes 30 s), the platform sends SIGKILL: no clean-up. `143` = killed by SIGTERM without handling it, `137` = SIGKILL. The `ENTRYPOINT` must use the exec form (`["dotnet", "Shortener.dll"]`) so `dotnet` is PID 1 and receives the signal; with the shell form, `sh` doesn't forward it. Graceful shutdown is a courtesy: crashes give no warning, so correctness still comes from atomic and idempotent work.
+</details>
+
+<details><summary><code>docker compose stop app</code> during a POST that hangs on a paused database took 10.56 s and exited 137. Why, and what is the fix?</summary>
+
+Three deadlines in the wrong order: Npgsql's connect `Timeout` 15 s, .NET `ShutdownTimeout` 30 s, Docker's `stop_grace_period` 10 s. The host waited for the request, the request waited for the database, and Docker killed everything at 10 s; the client got a dropped connection (`000`). Rule: a **deadline budget that shrinks inward**, each layer giving up before the one that called it, so the caller gets a real error (`503`) and not a timeout or a kill: `container grace > host ShutdownTimeout > request work > DB command timeout and DB connect timeout`. The container (or load balancer, or client) has the longest one. Set here: connect 3 s, command 3 s, `ShutdownTimeout` 12 s, `stop_grace_period` 15 s (12 s covers the measured 9.2 s of a hung command, see the next card). After the fix: exit `0`, and a POST stuck connecting got `503` after 3.04 s. With many instances short inner timeouts matter more: one shared database hangs for all of them, and long waits multiply pooled connections and retries (Npgsql pools 100 connections per instance; Postgres allows 100 by default).
+</details>
+
+<details><summary>With a 3 s command timeout, a POST on a paused Postgres still took 9.18 s to fail. What does that teach about timeouts?</summary>
+
+A configured timeout is not the time to failure. Measured: command timeout 5 s → `503` after 11.17 s, 3 s → 9.18 s, so about the timeout + 6 s on a connection taken from the pool (the source of the 6 s inside Npgsql was not found; `CancellationTimeout = -1` didn't change it). A new connection fails at the connect timeout (3.04 s). Measure the worst case of each path under a realistic failure (`docker compose pause`, not `stop`, which closes connections at once) and budget the outer layers for the measured number.
+</details>

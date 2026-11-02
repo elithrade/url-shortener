@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using Shortener;
 
 const int MaxAttempts = 5;
@@ -8,8 +9,17 @@ const int CodeLength = 7;
 const string ReadyTag = "ready";
 const int DbHealthCheckTimeoutSeconds = 2;
 
+// deadline budget, each layer gives up before the one calling it:
+// DB connect 3 s, DB command 3 s (measured: a hung command fails after the timeout + about 6 s) < host shutdown 12 s < container grace period (Compose: 15 s)
+const int DbConnectTimeoutSeconds = 3;
+const int DbCommandTimeoutSeconds = 3;
+const int ShutdownTimeoutSeconds = 12;
+
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.Configure<HostOptions>(o =>
+    o.ShutdownTimeout = TimeSpan.FromSeconds(ShutdownTimeoutSeconds)
+);
 
 bool usePostgres = RegisterStorage(builder);
 RegisterRateLimiter(builder);
@@ -60,7 +70,14 @@ static bool RegisterStorage(WebApplicationBuilder builder)
         }
 
         builder.Services.AddDbContextFactory<ShortenerDbContext>(o =>
-            o.UseNpgsql(connectionString)
+            o.UseNpgsql(
+                // the app enforces its connect budget, whatever the connection string says
+                new NpgsqlConnectionStringBuilder(connectionString)
+                {
+                    Timeout = DbConnectTimeoutSeconds,
+                }.ConnectionString,
+                npgsql => npgsql.CommandTimeout(DbCommandTimeoutSeconds)
+            )
         );
         builder.Services.AddSingleton<PostgresUrlStore>();
         // register multiple interfaces with the same implementation

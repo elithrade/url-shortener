@@ -250,7 +250,10 @@ Committed `68afdff`.
 
 #### ⬜ Structured logging
 
-#### ⬜ Graceful shutdown
+#### ✅ Graceful shutdown
+- Deadline budget, shrinking inward (constants in `Program.cs`): Npgsql connect `Timeout` 3 s and `CommandTimeout` 3 s (set in code, whatever the connection string says), `HostOptions.ShutdownTimeout` 12 s, Compose `stop_grace_period` 15 s. `SchemaMigrator` overrides the command timeout to 5 minutes, because migrations can run longer than a request (not covered by a test)
+- Measured with `docker compose pause postgres` and a POST in progress, then `docker compose stop app`: before, 10.56 s and exit `137` (SIGKILL, the client got a dropped connection). After: exit `0`, and the POST got `503`, on a new connection after 3.04 s and on a pooled connection hung mid-command after 9.18 s. A hung command fails after its timeout + about 6 s (5 s gave 11.17 s), source inside Npgsql not found. See `LESSONS.md` section 23
+- The Dockerfile uses the exec-form `ENTRYPOINT`, so `dotnet` is PID 1 and gets SIGTERM. `ExpirySweepService` logs `Cancel signalled, exiting...` on stop
 
 ## Line 1: usable and deployed (v1)
 
@@ -264,7 +267,7 @@ Committed `68afdff`.
 | 4 | ✅ Expiry | Done: a link can have a TTL, and expired links return 404. Model, `ExpiryPolicy`, lazy check on read, handler wiring, store and policy tests, endpoint tests with a `FakeTimeProvider` (alive at lifetime minus 1 s and 404 at exactly the lifetime, for an explicit and the default lifetime, plus a boundary theory for 59, 60, 31536000 and 31536001, which also asserts the 400 body contains `31536000`; mutation-checked with `Seconds` instead of `TotalSeconds`, 4 tests failed), the sweep measurement (see above, with the decision to keep the brute-force sweep), `IExpirySweeper.Sweep()`, `ExpirySweepService` and its tests, and a test that the store and sweeper resolve to the same instance. Optional leftovers: in-place `Sweep` and logging assertions with `FakeLogger` |
 | 5 | ✅ Persistence | A Postgres `IUrlStore` (EF Core with the Npgsql provider) replaces the in-memory one. Links survive a restart, acknowledged writes are durable, and the same contract tests run against both implementations. Uniqueness comes from a primary key on the code, and expiry from an `expires_at` column that reads check against the injected `TimeProvider`, with the existing sweeper deleting expired rows. Users and auth can later use the same database. Done: the store, the contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and a Compose stack with a data volume whose restart check kept a link (see "Already done"). The Redis lab's findings feed the Line 2 cache. Optional leftovers: see "Next up" |
 | 6 | ✅ Abuse protection | Done: rate limiting on `POST /shorten`, and a configured `BaseUrl`, validated at startup, for the self-link check and `shortUrl`. Optional leftover: `AllowedHosts` set to the real host in milestone 8 |
-| 7 | Config and ops | Settings in `IOptions<T>` and env vars (done for `Shortener` and `RateLimit`; `Storage` stays a pre-build read because it decides registrations), `/health/live` and `/health/ready` (done), structured logging, graceful shutdown |
+| 7 | Config and ops | Settings in `IOptions<T>` and env vars (done for `Shortener` and `RateLimit`; `Storage` stays a pre-build read because it decides registrations), `/health/live` and `/health/ready` (done), graceful shutdown with a deadline budget (done), structured logging |
 | 8 | Ship it | Dockerfile, image built and pushed by CI, deployed to a host, post-deploy smoke test. **Decide first:** where to host and which Postgres to use (a managed service, which gives backups, or a container with a `/data` volume and scheduled `pg_dump` backups plus a tested restore). The connection string comes from configuration, and the deploy must run the `migrate` step once before the app starts (settled: EF migrations, one-shot, see "Already done"), with a database role that can alter the schema for that step only |
 
 ### Schedule
@@ -326,7 +329,7 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Start each day by re-reading yesterday's diff, and end it with a committed state plus a note on what comes next.
 
 ## Next up
-1. **Milestone 7:** graceful shutdown (check what happens on SIGTERM to in-flight requests and the sweeper), then structured logging (JSON output for containers). Options and health endpoints are done.
+1. **Milestone 7:** structured logging (JSON output for containers, what to log per request). Options, health endpoints and graceful shutdown are done.
 2. **Milestone 8:** decide the host and the Postgres option first (see the milestone table and "Deployment shape").
 
 ## Open items (not scheduled)
@@ -340,7 +343,7 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 
 **Persistence**
 - Decide what a normal start does when the schema is missing: fail fast (for example via `GetPendingMigrationsAsync`) or keep the `500` on the first request. Readiness does not catch it: `CanConnectAsync` only proves the server accepts a connection.
-- Npgsql's connection `Timeout` is 15 s by default, so real requests also wait up to 15 s when the database hangs. Consider a lower `Timeout` in the connection string (milestone 8).
+- In milestone 8, check the host's grace period: the budget needs it above the app's `ShutdownTimeout` (12 s). Kubernetes defaults to 30 s.
 - Build the shared test fixture's database with `SchemaMigrator` instead of `EnsureCreatedAsync`, so tests use the production schema path.
 - The `57P01` test from the storage-outage entry.
 - A `CancellationToken` for `SchemaMigrator`.

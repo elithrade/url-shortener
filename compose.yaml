@@ -29,6 +29,8 @@ services:
     build: .
     ports:
       - "8080:8080"
+    # SIGTERM to SIGKILL; must stay above the app's ShutdownTimeout (12 s)
+    stop_grace_period: 15s
     environment:
       <<: *app-env
       # local stack only: Development allows an http BaseUrl (milestone 8 brings https)

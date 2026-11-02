@@ -12,6 +12,8 @@ public static class SchemaMigrator
         try
         {
             await using var db = await factory.CreateDbContextAsync();
+            // override command timeout when migration
+            db.Database.SetCommandTimeout(TimeSpan.FromMinutes(5));
             await db.Database.MigrateAsync();
 
             return 0;
