@@ -272,7 +272,7 @@ Committed `68afdff`.
 | 5 | ✅ Persistence | A Postgres `IUrlStore` (EF Core with the Npgsql provider) replaces the in-memory one. Links survive a restart, acknowledged writes are durable, and the same contract tests run against both implementations. Uniqueness comes from a primary key on the code, and expiry from an `expires_at` column that reads check against the injected `TimeProvider`, with the existing sweeper deleting expired rows. Users and auth can later use the same database. Done: the store, the contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and a Compose stack with a data volume whose restart check kept a link (see "Already done"). The Redis lab's findings feed the Line 2 cache. Optional leftovers: see "Next up" |
 | 6 | ✅ Abuse protection | Done: rate limiting on `POST /shorten`, and a configured `BaseUrl`, validated at startup, for the self-link check and `shortUrl`. Optional leftover: `AllowedHosts` set to the real host in milestone 8 |
 | 7 | ✅ Config and ops | Settings in `IOptions<T>` and env vars (done for `Shortener` and `RateLimit`; `Storage` stays a pre-build read because it decides registrations), `/health/live` and `/health/ready` (done), graceful shutdown with a deadline budget (done), structured JSON logging with one line per request (done) |
-| 8 | Ship it | Dockerfile, image built and pushed by CI, deployed to a host, post-deploy smoke test. **Decide first:** where to host and which Postgres to use (a managed service, which gives backups, or a container with a `/data` volume and scheduled `pg_dump` backups plus a tested restore). The connection string comes from configuration, and the deploy must run the `migrate` step once before the app starts (settled: EF migrations, one-shot, see "Already done"), with a database role that can alter the schema for that step only |
+| 8 | Ship it | Stage 1 of the Azure plan below: image built and pushed by CI, Container Apps plus managed Postgres defined in Bicep, deployed from GitHub Actions with OIDC, the `migrate` step as a Container Apps Job before each new revision (with a database role that can alter the schema for that step only), post-deploy smoke test. **Decided:** Azure Container Apps and Azure Database for PostgreSQL Flexible Server (see "Deployment shape") |
 
 ### Schedule
 | Week | Dates | Focus |
@@ -286,10 +286,29 @@ Committed `68afdff`.
 ## Deployment shape (notes for milestone 8 and Line 2)
 Decided in discussion, not yet built:
 - **The API and the database are never one container.** Separate containers, one main process each. Reasons: (1) scaling: with a database inside each API container, instances would hold different links and could issue the same code twice, because uniqueness comes from one shared primary key (Line 2, item C); (2) the API is stateless and replaceable, while the database needs a volume, backups and careful upgrades, so redeploying one must not restart the other; (3) different resources and failure modes; (4) health checks, logs and limits stay meaningful per container.
-- **v1 layout:** the same shape as `compose.yaml` on one VM (Postgres with a volume, the `migrate` step, the app), or a **managed Postgres** with only the API deployed. The managed option gives backups, failover and patching, and is the one to lean towards if the data matters. This is still the open "decide first" item in milestone 8.
+- **v1 layout (decided):** Azure, with the API on **Container Apps** and **managed Postgres** (Flexible Server). Goal: learn deploying to Azure with a path to scale, not production-grade resilience; the only user is the owner. Rejected: Postgres as a Container App (container storage is ephemeral, and Azure Files over SMB is not POSIX: no `chmod` and no hard links, which Postgres needs; NFS needs the Premium tier and a VNet) and Postgres in Docker on a VM (cheaper, but all the operations work: patching, backups, tested restores, network security).
 - **Several API instances:** N copies behind a load balancer, all on the same database. The `migrate` step runs once per deploy, not once per instance (the `EnsureCreatedAsync` race). During a rolling deploy the old version runs against the new schema for a while, so schema changes should be additive first (expand), with drops and renames in a later release (contract).
 - **Redis** (Line 2, item B) is its own service, never inside the API container: a read-through cache in front of Postgres, a cache TTL that never outlives `ExpiresAt`, eviction allowed (a lost entry costs one read), and redirects must still work when Redis is down.
 - Not covered yet: the load balancer and forwarded headers (the rate limiter's client key and the self-link check both depend on them), secrets in the host's store, and backup and restore tests.
+
+### Azure plan, in stages
+Each stage adds one layer of a typical enterprise setup (edge, gateway, private network, compute), so each can be learned on its own, and the work can stop after any stage. Infrastructure is defined in **Bicep** from stage 1, so recreating or scaling is a small diff and nothing depends on portal clicks.
+
+| Stage | What | Learns |
+|---|---|---|
+| 1 (milestone 8, v1) | Container Apps with public ingress, scale 0 to N; Flexible Server Burstable B1ms, public access with a firewall rule; images in GitHub Container Registry; GitHub Actions deploys with OIDC (federated credentials, no stored Azure secrets); the `migrate` step as a Container Apps Job; Log Analytics with a daily cap; a budget alert | the deploy pipeline, Container Apps revisions and jobs, Bicep |
+| 2 | Container Apps environment in a VNet, Postgres with private access (no public endpoint) | private networking |
+| 3 | API Management (Consumption tier) in front, subscription key required for `POST /shorten`, `GET /{code}` public; App Insights through OpenTelemetry (the `ILogger` code stays as it is) | gateway, products and keys, telemetry |
+| 4 (optional) | Front Door with a WAF, app ingress only from Front Door | edge. The expensive tier: check prices, try it, then tear it down |
+
+**Cost (approximate, East US pay-as-you-go, third-party figures; check the Azure pricing calculator):** Container Apps scaled to zero stays inside the monthly free grant (180,000 vCPU-seconds, 360,000 GiB-seconds, 2 million requests per subscription). Flexible Server B1ms is about $12 to $15 compute plus about $0.115 per GB-month of storage (32 GiB minimum, so about $16 to $19 in total); new free accounts can get it free for 12 months, and a stopped server pays only for storage (Azure restarts it after 7 days). Log Analytics: the first 5 GB per month are free, and the request logs are about 600 bytes each. GitHub Container Registry is free here (Azure Container Registry Basic would be about $0.167 per day). Expected: about $0 in the free year, otherwise mostly the database.
+
+**Stage 1 must-dos found so far:**
+- Container Apps ingress is a proxy, so `RemoteIpAddress` is the proxy's address: without `ForwardedHeaders` (trusting only the ingress), every client shares one rate-limit bucket.
+- `Shortener__BaseUrl` is the app's public https address (the generated `*.azurecontainerapps.io` name or a custom domain), and the environment is Production.
+- The app's request budget assumes the host's grace period is above `ShutdownTimeout` (12 s); check the Container Apps value.
+- Secrets (the connection string) come from Container Apps secrets or Key Vault, never from the repo.
+- `POST /shorten` is open to the internet until stage 3. Until then, ingress IP restrictions (only the owner's address) keep a public shortener from being used for phishing links.
 
 ## After v1: mock-interview drill
 Once v1 is live, before Line 2: ask the coach to quiz you from `LESSONS.md`.
@@ -333,7 +352,7 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Start each day by re-reading yesterday's diff, and end it with a committed state plus a note on what comes next.
 
 ## Next up
-1. **Milestone 8:** decide the host and the Postgres option first (see the milestone table and "Deployment shape").
+1. **Milestone 8, stage 1 of the Azure plan** (see "Deployment shape"): `ForwardedHeaders` behind the Container Apps ingress first (tests, then code), then Bicep for the resources, then the GitHub Actions deploy with OIDC and the migrate job, then a post-deploy smoke test.
 
 ## Open items (not scheduled)
 **Rate limiting**
