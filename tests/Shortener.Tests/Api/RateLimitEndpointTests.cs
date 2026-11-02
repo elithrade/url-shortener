@@ -22,16 +22,17 @@ public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
     public async Task Request_over_the_limit_get_429()
     {
         const string ip = "1.2.3.4";
+        string url = ShortenClientExtensions.UniqueUrl();
 
-        var first = await PostShortenAsync(ip);
+        var first = await _client.PostShortenAsync(url, clientIp: ip);
         Assert.Equal(HttpStatusCode.Created, first.StatusCode);
         Assert.Null(first.Headers.RetryAfter);
 
-        var second = await PostShortenAsync(ip);
+        var second = await _client.PostShortenAsync(url, clientIp: ip);
         Assert.Equal(HttpStatusCode.Created, second.StatusCode);
 
         // capacity reached
-        var third = await PostShortenAsync(ip);
+        var third = await _client.PostShortenAsync(url, clientIp: ip);
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
     }
 
@@ -39,11 +40,12 @@ public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
     public async Task A_limited_request_says_when_to_retry()
     {
         const string ip = "5.6.7.8";
+        string url = ShortenClientExtensions.UniqueUrl();
 
-        await PostShortenAsync(ip);
-        await PostShortenAsync(ip);
+        await _client.PostShortenAsync(url, clientIp: ip);
+        await _client.PostShortenAsync(url, clientIp: ip);
 
-        var third = await PostShortenAsync(ip);
+        var third = await _client.PostShortenAsync(url, clientIp: ip);
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
 
         var retryAfter = third.Headers.RetryAfter;
@@ -57,14 +59,15 @@ public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
     {
         const string clientOne = "192.168.0.1";
         const string clientTwo = "192.168.0.2";
+        string url = ShortenClientExtensions.UniqueUrl();
 
-        await PostShortenAsync(clientOne);
-        await PostShortenAsync(clientOne);
-        var third = await PostShortenAsync(clientOne);
+        await _client.PostShortenAsync(url, clientIp: clientOne);
+        await _client.PostShortenAsync(url, clientIp: clientOne);
+        var third = await _client.PostShortenAsync(url, clientIp: clientOne);
 
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
 
-        var first = await PostShortenAsync(clientTwo);
+        var first = await _client.PostShortenAsync(url, clientIp: clientTwo);
 
         Assert.Equal(HttpStatusCode.Created, first.StatusCode);
     }
@@ -73,13 +76,15 @@ public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
     // only this test may send requests without an IP, because the Unknown bucket is shared by the whole class
     public async Task Clients_without_an_address_share_one_limit()
     {
-        var first = await PostShortenAsync(null);
+        string url = ShortenClientExtensions.UniqueUrl();
+
+        var first = await _client.PostShortenAsync(url, clientIp: null);
         Assert.Equal(HttpStatusCode.Created, first.StatusCode);
 
-        var second = await PostShortenAsync(null);
+        var second = await _client.PostShortenAsync(url, clientIp: null);
         Assert.Equal(HttpStatusCode.Created, second.StatusCode);
 
-        var third = await PostShortenAsync(null);
+        var third = await _client.PostShortenAsync(url, clientIp: null);
 
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
     }
@@ -88,8 +93,9 @@ public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
     public async Task Redirects_are_not_limited()
     {
         const string ip = "202.101.0.1";
+        string url = ShortenClientExtensions.UniqueUrl();
 
-        var response = await PostShortenAsync(ip);
+        var response = await _client.PostShortenAsync(url, clientIp: ip);
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
 
         var content = await response.Content.ReadFromJsonAsync<ShortenResponse>();
@@ -106,21 +112,6 @@ public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
     private async Task<HttpResponseMessage> GetAsync(string code, string clientIp)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, $"/{code}");
-
-        if (clientIp is not null)
-        {
-            request.Headers.Add("X-Test-Client-Ip", clientIp);
-        }
-
-        return await _client.SendAsync(request);
-    }
-
-    private async Task<HttpResponseMessage> PostShortenAsync(string? clientIp)
-    {
-        var request = new HttpRequestMessage(HttpMethod.Post, "/shorten")
-        {
-            Content = JsonContent.Create(new { url = $"https://example.com/{Guid.NewGuid()}" }),
-        };
 
         if (clientIp is not null)
         {

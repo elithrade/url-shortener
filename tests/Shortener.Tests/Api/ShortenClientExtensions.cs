@@ -4,11 +4,16 @@ namespace Shortener.Tests;
 
 public static class ShortenClientExtensions
 {
+    // a URL no other test uses, because the in-memory store is shared within a test class
+    public static string UniqueUrl() => $"https://example.com/{Guid.NewGuid()}";
+
     // POST /shorten with a JSON body; host overrides the Host header (e.g. to forge it)
     public static Task<HttpResponseMessage> PostShortenAsync(
         this HttpClient client,
         string url,
-        string? host = null
+        string? host = null,
+        string? clientIp = null,
+        string? forwardedFor = null
     )
     {
         var request = new HttpRequestMessage(HttpMethod.Post, "/shorten")
@@ -19,6 +24,16 @@ public static class ShortenClientExtensions
         if (host is not null)
         {
             request.Headers.Host = host;
+        }
+
+        if (clientIp is not null)
+        {
+            request.Headers.Add("X-Test-Client-Ip", clientIp);
+        }
+
+        if (forwardedFor is not null)
+        {
+            request.Headers.Add("X-Forwarded-For", forwardedFor);
         }
 
         return client.SendAsync(request);
