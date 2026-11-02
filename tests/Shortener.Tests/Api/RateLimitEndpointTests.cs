@@ -24,15 +24,15 @@ public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
         const string ip = "1.2.3.4";
         string url = ShortenClientExtensions.UniqueUrl();
 
-        var first = await _client.PostShortenAsync(url, clientIp: ip);
+        var first = await _client.PostShortenAsync(url, peer: ip);
         Assert.Equal(HttpStatusCode.Created, first.StatusCode);
         Assert.Null(first.Headers.RetryAfter);
 
-        var second = await _client.PostShortenAsync(url, clientIp: ip);
+        var second = await _client.PostShortenAsync(url, peer: ip);
         Assert.Equal(HttpStatusCode.Created, second.StatusCode);
 
         // capacity reached
-        var third = await _client.PostShortenAsync(url, clientIp: ip);
+        var third = await _client.PostShortenAsync(url, peer: ip);
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
     }
 
@@ -42,10 +42,10 @@ public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
         const string ip = "5.6.7.8";
         string url = ShortenClientExtensions.UniqueUrl();
 
-        await _client.PostShortenAsync(url, clientIp: ip);
-        await _client.PostShortenAsync(url, clientIp: ip);
+        await _client.PostShortenAsync(url, peer: ip);
+        await _client.PostShortenAsync(url, peer: ip);
 
-        var third = await _client.PostShortenAsync(url, clientIp: ip);
+        var third = await _client.PostShortenAsync(url, peer: ip);
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
 
         var retryAfter = third.Headers.RetryAfter;
@@ -61,13 +61,13 @@ public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
         const string clientTwo = "192.168.0.2";
         string url = ShortenClientExtensions.UniqueUrl();
 
-        await _client.PostShortenAsync(url, clientIp: clientOne);
-        await _client.PostShortenAsync(url, clientIp: clientOne);
-        var third = await _client.PostShortenAsync(url, clientIp: clientOne);
+        await _client.PostShortenAsync(url, peer: clientOne);
+        await _client.PostShortenAsync(url, peer: clientOne);
+        var third = await _client.PostShortenAsync(url, peer: clientOne);
 
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
 
-        var first = await _client.PostShortenAsync(url, clientIp: clientTwo);
+        var first = await _client.PostShortenAsync(url, peer: clientTwo);
 
         Assert.Equal(HttpStatusCode.Created, first.StatusCode);
     }
@@ -78,13 +78,13 @@ public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
     {
         string url = ShortenClientExtensions.UniqueUrl();
 
-        var first = await _client.PostShortenAsync(url, clientIp: null);
+        var first = await _client.PostShortenAsync(url, peer: null);
         Assert.Equal(HttpStatusCode.Created, first.StatusCode);
 
-        var second = await _client.PostShortenAsync(url, clientIp: null);
+        var second = await _client.PostShortenAsync(url, peer: null);
         Assert.Equal(HttpStatusCode.Created, second.StatusCode);
 
-        var third = await _client.PostShortenAsync(url, clientIp: null);
+        var third = await _client.PostShortenAsync(url, peer: null);
 
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
     }
@@ -95,7 +95,7 @@ public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
         const string ip = "202.101.0.1";
         string url = ShortenClientExtensions.UniqueUrl();
 
-        var response = await _client.PostShortenAsync(url, clientIp: ip);
+        var response = await _client.PostShortenAsync(url, peer: ip);
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
 
         var content = await response.Content.ReadFromJsonAsync<ShortenResponse>();
@@ -109,13 +109,13 @@ public class RateLimitEndpointTests : IClassFixture<StrictRateLimitFactory>
         }
     }
 
-    private async Task<HttpResponseMessage> GetAsync(string code, string clientIp)
+    private async Task<HttpResponseMessage> GetAsync(string code, string peer)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, $"/{code}");
 
-        if (clientIp is not null)
+        if (peer is not null)
         {
-            request.Headers.Add("X-Test-Client-Ip", clientIp);
+            request.Headers.Add("X-Test-Client-Ip", peer);
         }
 
         return await _client.SendAsync(request);

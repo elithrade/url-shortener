@@ -1171,3 +1171,20 @@ The secret was only in the body, which is logged only if someone adds `HttpLoggi
 
 They answer different questions. The response status is a precondition (did the scenario happen?); if it fails, the setup broke, not the logging. The logged status is the behavior under test. The two can disagree, for example when the logging middleware sits where a later handler rewrites the response, so the log claims `200` while the client got `500`. `Assert.Equal(((int)response.StatusCode).ToString(), log.GetStructuredStateValue("StatusCode"))` states "the log records what the client received". `FakeLogRecord` stores property values as strings, and `GetSnapshot()` is a copy, so take it after the requests.
 </details>
+
+## 25. Forwarded headers behind a proxy
+
+<details><summary>Behind the Container Apps ingress, every request's <code>RemoteIpAddress</code> is the ingress. Why not just take the first address in <code>X-Forwarded-For</code>?</summary>
+
+The client writes the header before it reaches the proxy, and each proxy only appends the peer it saw. So in `198.51.100.9, 203.0.113.1` the left entry is whatever the client typed, and only the rightmost one (written by our proxy) can be trusted. Read one entry from the right per proxy you run (`ForwardLimit`), and believe the header only when the peer is a trusted proxy (`KnownNetworks`, or `TrustAnyProxy` when the app is reachable through the ingress alone). Taking the first entry hands every attacker a fresh rate-limit bucket.
+</details>
+
+<details><summary>In these tests, what is the "peer", and why must the peer be the same on every request of a scenario?</summary>
+
+The peer is whoever holds the TCP connection to the app (`Connection.RemoteIpAddress`): in production the proxy, not the client. The client's address exists only in `X-Forwarded-For`. A scenario such as "two clients behind one proxy" must send every request from the proxy and vary only the header; otherwise the clients get separate buckets for a reason that has nothing to do with forwarding, and the test passes before the code exists. The same goes for two `WithWebHostBuilder` apps: each has its own rate limiter, so they never share a bucket.
+</details>
+
+<details><summary>A helper called <code>PostShortenAsync(url, peer, forwardedFor: x)</code> where the signature is <code>(url, string? host = null, string? peer = null, string? forwardedFor = null)</code>. What went wrong?</summary>
+
+C# binds positional arguments by position, not by name: `peer` filled `host`, so the requests carried `Host: 10.0.0.1` and no peer at all, and one test turned green for the wrong reason. With several optional parameters of the same type, the compiler can't catch it. Name every optional argument (`peer: peer`), and treat a test that changes colour unexpectedly as a bug in the test until proven otherwise.
+</details>

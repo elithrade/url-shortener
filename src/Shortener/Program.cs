@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.HttpLogging;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -25,22 +26,29 @@ builder.Services.Configure<HostOptions>(o =>
 bool usePostgres = RegisterStorage(builder);
 RegisterRateLimiter(builder);
 RegisterShortenerOptions(builder);
+RegisterForwardedHeaders(builder);
 RegisterHealthChecks(builder, usePostgres);
 RegisterRequestLogging(builder);
 
 var app = builder.Build();
-
-// one log line per request (method, path, status, duration); health probes would only add noise
-app.UseWhen(
-    ctx => !ctx.Request.Path.StartsWithSegments("/health"),
-    branch => branch.UseHttpLogging()
-);
 StartupLog.UsingStorage(app.Logger, usePostgres ? "Postgres" : "InMemory");
 
 if (args.Length > 0 && args[0] == "migrate")
 {
     return await RunMigrationAsync(app, usePostgres);
 }
+
+// first in the pipeline, so everything after it (the rate limiter) sees the client's address
+if (app.Services.GetRequiredService<IOptions<TrustedProxyOptions>>().Value.Enabled)
+{
+    app.UseForwardedHeaders();
+}
+
+// one log line per request (method, path, status, duration); health probes would only add noise
+app.UseWhen(
+    ctx => !ctx.Request.Path.StartsWithSegments("/health"),
+    branch => branch.UseHttpLogging()
+);
 
 app.MapPost("/shorten", HandlePost).AddEndpointFilter<RateLimitFilter>();
 app.MapGet("/{code}", HandleGet);
@@ -130,6 +138,42 @@ static void RegisterShortenerOptions(WebApplicationBuilder builder)
         .Services.AddOptions<ShortenerOptions>()
         .BindConfiguration(ShortenerOptions.Section)
         .ValidateOnStart();
+}
+
+static void RegisterForwardedHeaders(WebApplicationBuilder builder)
+{
+    builder.Services.AddSingleton<
+        IValidateOptions<TrustedProxyOptions>,
+        TrustedProxyOptionsValidator
+    >();
+    builder
+        .Services.AddOptions<TrustedProxyOptions>()
+        .BindConfiguration(TrustedProxyOptions.Section)
+        .ValidateDataAnnotations()
+        .ValidateOnStart();
+
+    // only X-Forwarded-For: Host comes from Shortener:BaseUrl, and the scheme isn't used
+    builder
+        .Services.AddOptions<ForwardedHeadersOptions>()
+        .Configure<IOptions<TrustedProxyOptions>>(
+            (forwarded, trusted) =>
+            {
+                forwarded.ForwardedHeaders = ForwardedHeaders.XForwardedFor;
+                forwarded.ForwardLimit = trusted.Value.ForwardLimit;
+
+                // drop the loopback defaults: trust only what config names
+                forwarded.KnownProxies.Clear();
+                forwarded.KnownIPNetworks.Clear();
+                if (trusted.Value.TrustAnyProxy)
+                {
+                    return; // empty lists mean "trust every peer"
+                }
+                foreach (var network in trusted.Value.KnownNetworks)
+                {
+                    forwarded.KnownIPNetworks.Add(System.Net.IPNetwork.Parse(network));
+                }
+            }
+        );
 }
 
 static void RegisterRequestLogging(WebApplicationBuilder builder)

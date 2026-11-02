@@ -352,7 +352,7 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Start each day by re-reading yesterday's diff, and end it with a committed state plus a note on what comes next.
 
 ## Next up
-1. **Milestone 8, stage 1 of the Azure plan** (see "Deployment shape"): `ForwardedHeaders` behind the Container Apps ingress first (tests, then code), then Bicep for the resources, then the GitHub Actions deploy with OIDC and the migrate job, then a post-deploy smoke test.
+1. **Milestone 8, stage 1 of the Azure plan** (see "Deployment shape"): ✅ `ForwardedHeaders` (the `ForwardedHeaders` section: off by default, `X-Forwarded-For` only, `TrustAnyProxy` or `KnownNetworks`, `ForwardLimit` 1; five tests, each mutation-checked). Next: Bicep for the resources, then the GitHub Actions deploy with OIDC and the migrate job, then a post-deploy smoke test.
 
 ## Open items (not scheduled)
 **Rate limiting**
