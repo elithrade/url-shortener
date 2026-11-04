@@ -95,7 +95,8 @@ resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
-var connectionString = 'Host=${postgres.properties.fullyQualifiedDomainName};Database=${databaseName};Username=${postgresAdminLogin};Password=${postgresAdminPassword};SSL Mode=Require'
+// VerifyFull: encrypt and check that the certificate is valid and issued for this host name
+var connectionString = 'Host=${postgres.properties.fullyQualifiedDomainName};Database=${databaseName};Username=${postgresAdminLogin};Password=${postgresAdminPassword};SSL Mode=VerifyFull'
 
 // the app and the migrate job share the secret and the storage settings
 var secrets = [
@@ -158,6 +159,8 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
           ]
         }
       ]
+      // SIGTERM to SIGKILL: must stay above the app's ShutdownTimeout (12 s), like Compose's stop_grace_period
+      terminationGracePeriodSeconds: 15
       scale: {
         minReplicas: 0 // scale to zero when idle: no cost
         // the rate-limit buckets live in each replica's memory, so 2 replicas would double the limit;
