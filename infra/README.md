@@ -102,9 +102,36 @@ curl -i $BASE/<code from the response>     # 302 to example.com
 
 From any other IP, the ingress answers `403`.
 
-## Releasing a new version
+## Continuous deployment
 
-Build and push a new image (step 1), run the migrate job if the schema changed, and deploy again with the new `SHORTENER_IMAGE`. The app gets a new revision. With `activeRevisionsMode: Single`, traffic moves to it once it is ready and the old one is stopped.
+`.github/workflows/deploy.yml` releases every push to `main` once CI (`ci.yml`) has passed on it: build and push the image with the run's `GITHUB_TOKEN`, sign in to Azure with OIDC, run the migrate job on the new image (a failure stops here, and the current revision keeps serving), deploy `main.bicep`, then check `/health/ready` through a temporary ingress rule for the runner's IP. Docs-only pushes run neither.
+
+One-time setup (as the owner):
+
+```bash
+az identity create -g rg-shortener -n id-shortener-deploy
+PRINCIPAL=$(az identity show -g rg-shortener -n id-shortener-deploy --query principalId -o tsv)
+az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal \
+  --role Contributor --scope $(az group show -n rg-shortener --query id -o tsv)
+
+# the subject must match GitHub's token exactly; GitHub now sends the form with numeric IDs
+# (repo:<owner>@<owner id>/<repo>@<repo id>:ref:refs/heads/main). A failed login's
+# AADSTS700213 error shows the exact value to use.
+az identity federated-credential create -g rg-shortener --identity-name id-shortener-deploy -n github-main \
+  --issuer https://token.actions.githubusercontent.com --subject '<subject>' --audiences api://AzureADTokenExchange
+```
+
+Repository secrets (secrets, not variables: the repo's Actions logs are public and only secrets are masked): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `SHORTENER_ALLOWED_IP`, `POSTGRES_ADMIN_PASSWORD`. Pipe values in (`... | gh secret set NAME`) to keep them out of shell history. The GHCR package needs the repo under Package settings → Manage Actions access (role Write), or the `org.opencontainers.image.source` label from the Dockerfile on a first push.
+
+Before pushing:
+- Postgres must be running (`az postgres flexible-server start ...`), or the migrate step fails and nothing is deployed.
+- If your public IP changed, update `SHORTENER_ALLOWED_IP` first, or the deploy locks you out.
+
+A failed run can be repeated without redoing the jobs that passed: `gh run rerun <run id> --failed`.
+
+## Releasing a new version by hand
+
+Normally the pipeline does this. By hand: build and push a new image (step 1), run the migrate job if the schema changed, and deploy again with the new `SHORTENER_IMAGE`. The app gets a new revision. With `activeRevisionsMode: Single`, traffic moves to it once it is ready and the old one is stopped.
 
 ## Troubleshooting
 

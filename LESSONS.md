@@ -1216,6 +1216,16 @@ The runner sits outside Azure. Running `migrate` there would mean opening the Po
 A user-assigned managed identity answers **who** (its client ID). A role assignment answers **what it may do** (Contributor on `rg-shortener` only). A federated credential, attached to that identity, answers **how it signs in**: accept a token signed by GitHub (`https://token.actions.githubusercontent.com`) whose subject is exactly `repo:<owner>/<repo>:ref:refs/heads/main`. On each run GitHub mints a fresh token that expires within minutes, and Azure swaps it for an Azure token valid for about an hour, so no long-lived credential exists. The token must match the federated credential (may it become the identity?); the role only applies after sign-in (what can it do?). A fork, a pull request or another branch has a different subject and gets nothing.
 </details>
 
+<details><summary>The first OIDC login failed with <code>AADSTS700213: No matching federated identity record found</code>, although the credential trusted <code>repo:&lt;owner&gt;/&lt;repo&gt;:ref:refs/heads/main</code>. Why?</summary>
+
+GitHub sent the subject in its newer form, which carries the numeric IDs: `repo:<owner>@<owner id>/<repo>@<repo id>:ref:refs/heads/main`, and Azure compares the subject as an exact string. Copy the subject from the error into the federated credential. The new form is safer: names can be reused (rename or delete the repo and someone can create one with the old name, which the classic subject would trust), while the IDs never change.
+</details>
+
+<details><summary>Deploying after CI with <code>on: workflow_run</code> (branches: main). What can go wrong without an extra check?</summary>
+
+`workflow_run` fires for every finished CI run, including CI for pull requests, and a fork can name its branch `main`. The deploy workflow itself runs from the default branch with the repo's secrets and the OIDC trust for `main`, so it could build and deploy a stranger's commit. Gate it: `workflow_run.conclusion == 'success'`, `workflow_run.event == 'push'` and `workflow_run.head_repository.full_name == github.repository`. Also build `workflow_run.head_sha` (the commit CI tested), not `github.sha` (main's latest commit, which may be newer).
+</details>
+
 <details><summary>The workflow needs the client, tenant and subscription IDs. Are they credentials, and why store them as GitHub secrets anyway?</summary>
 
 They are identifiers: which identity, which directory, where to deploy. Knowing all three doesn't let anyone sign in without a GitHub-signed token for this repo's `main`. They go in secrets rather than variables because the repo is public, so its Actions logs are public, and secrets are masked there (`***`) while variables print in clear.
