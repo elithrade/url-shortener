@@ -38,6 +38,11 @@ if (args.Length > 0 && args[0] == "migrate")
     return await RunMigrationAsync(app, usePostgres);
 }
 
+// run every ValidateOnStart check now, before Run: a bad setting fails here while the host is
+// still alive, instead of inside Run, which disposes the host as it fails (that raced with
+// WebApplicationFactory and surfaced as ObjectDisposedException in the startup tests)
+app.Services.GetRequiredService<IStartupValidator>().Validate();
+
 // first in the pipeline, so everything after it (the rate limiter) sees the client's address
 if (app.Services.GetRequiredService<IOptions<TrustedProxyOptions>>().Value.Enabled)
 {
