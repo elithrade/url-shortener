@@ -1,12 +1,14 @@
-# Test, build and deploy every push to main (stage 1 of the Azure plan; manual steps in infra/README.md).
+# Build and deploy every push to main once CI has passed (stage 1 of the Azure plan; manual steps in infra/README.md).
 # Azure sign-in is OIDC: no stored Azure credential, see LESSONS.md section 26.
 name: deploy
 
 on:
-  push:
+  # deploy only code that CI (ci.yml) has tested: runs after every finished CI run, checked below
+  workflow_run:
+    workflows: [Url shortener web app CI]
+    types: [completed]
     branches: [main]
-    paths-ignore: ['**.md'] # docs-only pushes don't redeploy
-  workflow_dispatch: # run by hand from the Actions tab
+  workflow_dispatch: # run by hand from the Actions tab (deploys the latest main)
 
 # one deploy at a time; a newer push waits instead of cancelling a half-done migration
 concurrency:
@@ -17,28 +19,28 @@ permissions:
   contents: read
 
 env:
-  IMAGE: ghcr.io/${{ github.repository }}:${{ github.sha }}
+  # a workflow_run runs on main's latest commit, which may be newer than the one CI tested
+  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  IMAGE: ghcr.io/${{ github.repository }}:${{ github.event.workflow_run.head_sha || github.sha }}
   RG: rg-shortener
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-      # the Postgres tests use Testcontainers; the runner has Docker
-      - run: dotnet test
-
   build:
-    needs: test
+    # CI also runs for pull requests, and a fork can name its branch main: deploy only a
+    # successful CI run of a push to this repository
+    if: >-
+      github.event_name == 'workflow_dispatch' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write # push to GHCR with the run's own GITHUB_TOKEN
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
       - name: Push image
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -52,7 +54,9 @@ jobs:
       contents: read
       id-token: write # lets the job ask GitHub for an OIDC token
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
 
       - uses: azure/login@v2
         with:

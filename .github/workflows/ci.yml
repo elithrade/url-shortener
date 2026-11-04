@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+    paths-ignore: ['**.md'] # docs-only pushes need no build (and so no deploy)
 
   pull_request:
     branches:
