@@ -64,6 +64,22 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # Postgres is stopped when idle to save cost (stop-postgres.yml); the migration needs it running
+      - name: Start Postgres
+        run: |
+          server=$(az postgres flexible-server list -g "$RG" --query "[0].name" -o tsv)
+          for _ in $(seq 40); do
+            state=$(az postgres flexible-server show -g "$RG" -n "$server" --query state -o tsv)
+            echo "postgres: $state"
+            case "$state" in
+              Ready) exit 0 ;;
+              Stopped) az postgres flexible-server start -g "$RG" -n "$server" -o none ;;
+              *) sleep 15 ;; # Starting, Stopping, Updating: wait for it to settle
+            esac
+          done
+          echo "postgres: not ready after 10 minutes"
+          exit 1
+
       # the schema first: the new code must never meet an old schema. A failure stops here,
       # and the current revision keeps serving.
       - name: Migrate

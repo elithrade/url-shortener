@@ -124,7 +124,6 @@ az identity federated-credential create -g rg-shortener --identity-name id-short
 Repository secrets (secrets, not variables: the repo's Actions logs are public and only secrets are masked): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `SHORTENER_ALLOWED_IP`, `POSTGRES_ADMIN_PASSWORD`. Pipe values in (`... | gh secret set NAME`) to keep them out of shell history. The GHCR package needs the repo under Package settings → Manage Actions access (role Write), or the `org.opencontainers.image.source` label from the Dockerfile on a first push.
 
 Before pushing:
-- Postgres must be running (`az postgres flexible-server start ...`), or the migrate step fails and nothing is deployed.
 - If your public IP changed, update `SHORTENER_ALLOWED_IP` first, or the deploy locks you out.
 
 A failed run can be repeated without redoing the jobs that passed: `gh run rerun <run id> --failed`.
@@ -144,6 +143,11 @@ az containerapp revision list -n shortener -g rg-shortener -o table             
 Job logs: portal → the job → Execution history → Console logs, or `az containerapp job logs show -n shortener-migrate -g rg-shortener` (needs the `containerapp` CLI extension, which `az` offers to install on first use).
 
 ## Keeping the cost down
+
+Measured in `australiaeast` (no free offer on this account): B1MS compute about AU$0.037 an hour (about AU$27 a month if it never stops), 32 GB of storage about AU$6.30 a month whether running or not, Log Analytics within its free 5 GB.
+
+`.github/workflows/stop-postgres.yml` stops the server every night (14:00 UTC), and `deploy.yml` starts it before migrating, so a push never fails on a stopped database. Start it by hand to use the app between deploys. GitHub disables scheduled workflows in a public repo after 60 days without activity; re-enable it from the Actions tab.
+
 
 ```bash
 az postgres flexible-server stop  -g rg-shortener -n <server name>   # stopped servers pay only for storage
