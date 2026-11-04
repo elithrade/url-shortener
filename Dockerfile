@@ -6,6 +6,8 @@ COPY src/Shortener/ src/Shortener/
 RUN dotnet publish src/Shortener/Shortener.csproj -c Release -o /app --no-restore
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
+# links the GHCR package to the repo, so the workflow's GITHUB_TOKEN can push to it
+LABEL org.opencontainers.image.source=https://github.com/elithrade/url-shortener
 WORKDIR /app
 COPY --from=build /app .
 USER $APP_UID

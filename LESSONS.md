@@ -1210,3 +1210,13 @@ The runner sits outside Azure. Running `migrate` there would mean opening the Po
 
 `@secure()` keeps the value out of deployment logs and the deployment history; `readEnvironmentVariable` keeps it out of the repo and the command line (and so out of shell history). Neither keeps it stable: the Postgres admin password is set from this parameter on every deploy, so a different value silently changes the password. Keep the one value somewhere durable (a mode-600 file, a password manager, later a GitHub secret).
 </details>
+
+<details><summary>GitHub Actions deploys to Azure with OIDC and no stored password. What are the three pieces on the Azure side, and what does each answer?</summary>
+
+A user-assigned managed identity answers **who** (its client ID). A role assignment answers **what it may do** (Contributor on `rg-shortener` only). A federated credential, attached to that identity, answers **how it signs in**: accept a token signed by GitHub (`https://token.actions.githubusercontent.com`) whose subject is exactly `repo:<owner>/<repo>:ref:refs/heads/main`. On each run GitHub mints a fresh token that expires within minutes, and Azure swaps it for an Azure token valid for about an hour, so no long-lived credential exists. The token must match the federated credential (may it become the identity?); the role only applies after sign-in (what can it do?). A fork, a pull request or another branch has a different subject and gets nothing.
+</details>
+
+<details><summary>The workflow needs the client, tenant and subscription IDs. Are they credentials, and why store them as GitHub secrets anyway?</summary>
+
+They are identifiers: which identity, which directory, where to deploy. Knowing all three doesn't let anyone sign in without a GitHub-signed token for this repo's `main`. They go in secrets rather than variables because the repo is public, so its Actions logs are public, and secrets are masked there (`***`) while variables print in clear.
+</details>

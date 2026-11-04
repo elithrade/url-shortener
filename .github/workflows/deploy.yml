@@ -1,0 +1,110 @@
+# Test, build and deploy every push to main (stage 1 of the Azure plan; manual steps in infra/README.md).
+# Azure sign-in is OIDC: no stored Azure credential, see LESSONS.md section 26.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md'] # docs-only pushes don't redeploy
+  workflow_dispatch: # run by hand from the Actions tab
+
+# one deploy at a time; a newer push waits instead of cancelling a half-done migration
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}:${{ github.sha }}
+  RG: rg-shortener
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      # the Postgres tests use Testcontainers; the runner has Docker
+      - run: dotnet test
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to GHCR with the run's own GITHUB_TOKEN
+    steps:
+      - uses: actions/checkout@v4
+      - name: Push image
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # lets the job ask GitHub for an OIDC token
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # the schema first: the new code must never meet an old schema. A failure stops here,
+      # and the current revision keeps serving.
+      - name: Migrate
+        run: |
+          az containerapp job update -n shortener-migrate -g "$RG" --image "$IMAGE" -o none
+          execution=$(az containerapp job start -n shortener-migrate -g "$RG" --query name -o tsv)
+          for _ in $(seq 60); do
+            status=$(az containerapp job execution show -n shortener-migrate -g "$RG" \
+              --job-execution-name "$execution" --query properties.status -o tsv)
+            echo "migrate: $status"
+            case "$status" in
+              Succeeded) exit 0 ;;
+              Failed | Stopped | Degraded) exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "migrate: no result after 10 minutes"
+          exit 1
+
+      # Bicep stays the source of truth: the same template as the manual deploy, with the new image
+      - name: Deploy
+        env:
+          SHORTENER_IMAGE: ${{ env.IMAGE }}
+          SHORTENER_ALLOWED_IP: ${{ secrets.SHORTENER_ALLOWED_IP }}
+          POSTGRES_ADMIN_PASSWORD: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          az deployment group create -g "$RG" -n "deploy-${{ github.run_number }}" \
+            -f infra/main.bicep -p infra/main.bicepparam -o none
+
+      # The ingress admits only the owner's IP, so let this runner in for the check and always
+      # take the rule out again. If removal ever fails, the next deploy resets the list from Bicep.
+      - name: Smoke test
+        run: |
+          url=$(az deployment group show -g "$RG" -n "deploy-${{ github.run_number }}" \
+            --query properties.outputs.appUrl.value -o tsv)
+          echo "::add-mask::$url"
+          runner_ip=$(curl -s https://api.ipify.org)
+          az containerapp ingress access-restriction set -n shortener -g "$RG" \
+            --rule-name ci-smoke --ip-address "$runner_ip/32" --action Allow -o none
+          # retries cover the cold start from zero replicas and the rule taking effect
+          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 6 \
+            -o /dev/null -w "ready: %{http_code}\n" "$url/health/ready"
+
+      - name: Remove smoke-test access
+        if: always()
+        run: |
+          az containerapp ingress access-restriction remove -n shortener -g "$RG" \
+            --rule-name ci-smoke -o none || true
