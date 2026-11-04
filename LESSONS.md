@@ -1188,3 +1188,25 @@ The peer is whoever holds the TCP connection to the app (`Connection.RemoteIpAdd
 
 C# binds positional arguments by position, not by name: `peer` filled `host`, so the requests carried `Host: 10.0.0.1` and no peer at all, and one test turned green for the wrong reason. With several optional parameters of the same type, the compiler can't catch it. Name every optional argument (`peer: peer`), and treat a test that changes colour unexpectedly as a bug in the test until proven otherwise.
 </details>
+
+## 26. Deploying to Azure (stage 1)
+
+<details><summary>The first deploy to a new subscription needs two steps outside the Bicep. Which, and why can't the template or CI do them?</summary>
+
+Registering the resource providers (`az provider register -n Microsoft.App`, `Microsoft.DBforPostgreSQL`) and creating the resource group. Both act on the subscription, while the template deploys into a resource group and the CI identity will only get rights on that group. They are one-time, so they live in the setup notes (`infra/README.md`), not in the pipeline.
+</details>
+
+<details><summary>Why does Container Apps pull the image from GHCR without any registry credentials, and what would a private image cost?</summary>
+
+The package is public (a new GHCR package starts private and has to be switched once). A private one would need a long-lived personal access token stored as a Container Apps registry secret: a credential that expires, needs rotating and can leak. The image is built from a public repo and carries no secrets (the connection string arrives at run time as a Container Apps secret), so public gives nothing away. Check it the way Azure sees it: `docker logout ghcr.io`, then `docker manifest inspect <image>`.
+</details>
+
+<details><summary>CI will "run the migration". Why does it start a Container Apps Job instead of running <code>migrate</code> on the GitHub runner?</summary>
+
+The runner sits outside Azure. Running `migrate` there would mean opening the Postgres firewall to GitHub's large, changing address ranges and copying the connection string into GitHub as well. The job runs inside the Container Apps environment, which the firewall already admits, with the secret it already has, so CI only needs the right to start it. Order matters: run the job before the app moves to a new image, so the new code never meets an old schema.
+</details>
+
+<details><summary>A Bicep parameter is <code>@secure()</code> and read with <code>readEnvironmentVariable</code>. What do those two guard against, and what do they not?</summary>
+
+`@secure()` keeps the value out of deployment logs and the deployment history; `readEnvironmentVariable` keeps it out of the repo and the command line (and so out of shell history). Neither keeps it stable: the Postgres admin password is set from this parameter on every deploy, so a different value silently changes the password. Keep the one value somewhere durable (a mode-600 file, a password manager, later a GitHub secret).
+</details>

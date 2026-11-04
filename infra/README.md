@@ -35,6 +35,8 @@ az provider register -n Microsoft.DBforPostgreSQL --wait
 az provider register -n Microsoft.OperationalInsights --wait
 ```
 
+A budget with email alerts (it only alerts, it never stops spending), easiest in the portal: Cost Management → Budgets → Add, scoped to the subscription. Cost data lags by up to a day. To check whether the account still has the 12-month free services (B1ms Postgres is one of them): portal → Free services, or after a day, Cost analysis shows whether Postgres compute is charged.
+
 Check that the region offers what the template uses (B1ms and Postgres 17):
 
 ```bash

@@ -303,12 +303,12 @@ Each stage adds one layer of a typical enterprise setup (edge, gateway, private 
 
 **Cost (approximate, East US pay-as-you-go, third-party figures; check the Azure pricing calculator):** Container Apps scaled to zero stays inside the monthly free grant (180,000 vCPU-seconds, 360,000 GiB-seconds, 2 million requests per subscription). Flexible Server B1ms is about $12 to $15 compute plus about $0.115 per GB-month of storage (32 GiB minimum, so about $16 to $19 in total); new free accounts can get it free for 12 months, and a stopped server pays only for storage (Azure restarts it after 7 days). Log Analytics: the first 5 GB per month are free, and the request logs are about 600 bytes each. GitHub Container Registry is free here (Azure Container Registry Basic would be about $0.167 per day). Expected: about $0 in the free year, otherwise mostly the database.
 
-**Stage 1 must-dos found so far:**
-- Container Apps ingress is a proxy, so `RemoteIpAddress` is the proxy's address: without `ForwardedHeaders` (trusting only the ingress), every client shares one rate-limit bucket.
-- `Shortener__BaseUrl` is the app's public https address (the generated `*.azurecontainerapps.io` name or a custom domain), and the environment is Production.
-- The app's request budget assumes the host's grace period is above `ShutdownTimeout` (12 s); check the Container Apps value.
-- Secrets (the connection string) come from Container Apps secrets or Key Vault, never from the repo.
-- `POST /shorten` is open to the internet until stage 3. Until then, ingress IP restrictions (only the owner's address) keep a public shortener from being used for phishing links.
+**Stage 1 must-dos, and how each was handled:**
+- ✅ Container Apps ingress is a proxy, so `RemoteIpAddress` is the proxy's address. `ForwardedHeaders` with `TrustAnyProxy` (the app is reachable only through the ingress). Checked in production: 7 posts, each with a different forged `X-Forwarded-For`, all landed in one bucket (`429` after 5). Not yet shown: that the bucket is keyed on the client and not on the ingress (needs a second client IP; possible once stage 3 opens the ingress).
+- ✅ `Shortener__BaseUrl` is built in Bicep from the environment's default domain, and the environment is Production; `shortUrl` comes back as the https address.
+- ⬜ The app's request budget assumes the host's grace period is above `ShutdownTimeout` (12 s). The deployed app reports no `terminationGracePeriodSeconds` with API version 2024-03-01, so it runs on the platform default (believed to be 30 s, not verified). Set it explicitly with a newer API version.
+- ✅ The connection string is a Container Apps secret, built in Bicep from a `@secure()` parameter that is read from an environment variable at deploy time.
+- ✅ `POST /shorten` is open to the internet until stage 3, so the ingress allows only the owner's IP.
 
 ## After v1: mock-interview drill
 Once v1 is live, before Line 2: ask the coach to quiz you from `LESSONS.md`.
@@ -352,7 +352,7 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Start each day by re-reading yesterday's diff, and end it with a committed state plus a note on what comes next.
 
 ## Next up
-1. **Milestone 8, stage 1 of the Azure plan** (see "Deployment shape"): ✅ `ForwardedHeaders` (the `ForwardedHeaders` section: off by default, `X-Forwarded-For` only, `TrustAnyProxy` or `KnownNetworks`, `ForwardLimit` 1; five tests, each mutation-checked). Next: Bicep for the resources, then the GitHub Actions deploy with OIDC and the migrate job, then a post-deploy smoke test.
+1. **Milestone 8, stage 1 of the Azure plan** (see "Deployment shape"): ✅ `ForwardedHeaders` (the `ForwardedHeaders` section: off by default, `X-Forwarded-For` only, `TrustAnyProxy` or `KnownNetworks`, `ForwardLimit` 1; five tests, each mutation-checked). ✅ Bicep (`infra/`) and a first manual deploy to `australiaeast`: the migrate job ran, both health checks return `200`, and `POST /shorten` returns `201` (steps in `infra/README.md`). ✅ A subscription budget with email alerts. Next: the GitHub Actions deploy with OIDC (build, push to GHCR with `GITHUB_TOKEN`, start the migrate job, then roll the app), with the smoke test after each deploy. Small follow-ups: the grace period (above), `SSL Mode=VerifyFull` instead of `Require` (verify the server certificate), and an `org.opencontainers.image.source` label in the Dockerfile so the GHCR package is linked to the repo.
 
 ## Open items (not scheduled)
 **Rate limiting**
