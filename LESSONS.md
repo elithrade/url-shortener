@@ -1230,3 +1230,45 @@ GitHub sent the subject in its newer form, which carries the numeric IDs: `repo:
 
 They are identifiers: which identity, which directory, where to deploy. Knowing all three doesn't let anyone sign in without a GitHub-signed token for this repo's `main`. They go in secrets rather than variables because the repo is public, so its Actions logs are public, and secrets are masked there (`***`) while variables print in clear.
 </details>
+
+<details><summary>Postgres B1ms with no free offer: stopping it nightly cuts compute, but storage still costs about AU$6.30 a month. Can you shrink the 32 GB, and what's the alternative?</summary>
+
+No. 32 GB is the smallest size for both storage types (Premium SSD and SSD v2), and Flexible Server storage can only grow. The only way to stop paying for it is to delete the server: `delete-postgres.yml` does that, and the next deploy finds no server, runs the template first to recreate it (same name from `uniqueString`, same password from the secret), then migrates. The data is gone, and the deploy takes about 12 minutes instead of 5. Delete the server, never the resource group: the deploy identity lives in it. Cost analysis lags up to a day, so a rise after stopping is usually old usage arriving late.
+</details>
+
+<details><summary>The repo is public. Who can run its workflows, and why can't a fork's pull request reach Azure?</summary>
+
+Running a workflow by hand needs write access; scheduled and push runs come only from this repo's `main`. A fork's pull request can trigger `ci.yml`, but that run gets no secrets, a read-only token and no OIDC token, and the federated credential only trusts `main` of this repo anyway. The `workflow_run` guard in `deploy.yml` stops a fork's CI from triggering a deploy. What's left is wasted runner minutes, which approval for all external contributors closes.
+</details>
+
+## 27. Click analytics: the click store
+
+<details><summary>Clicks go redirect → channel → consumer → <code>IClickStore</code>. Where are they counted, and can stats be read before a flush?</summary>
+
+In two places. The consumer (a `BackgroundService`) sums clicks per (code, day) in memory for one interval; the flush calls `AddAsync`, which adds those sums to the stored totals for good. The redirect only does `TryWrite` and never waits for the database. Stats are eventually consistent: up to one flush interval behind. Accepted on purpose, because the redirect stays fast and 1,000 clicks become one upsert. A crash loses up to one interval of clicks, which is fine for analytics and not for links, so `IUrlStore` writes synchronously. The question that decides sync or async: how much loss can you tolerate?
+</details>
+
+<details><summary>Two flushes add to the same (code, day) row at once. Why not read the count, add in C#, and write it back?</summary>
+
+Lost update: both read 5, one writes 9, the other writes 7, and 4 clicks are gone (check-then-set again). Let the database do it in one statement: `INSERT ... ON CONFLICT (code, day) DO UPDATE SET count = click_stats.count + excluded.count`. Postgres locks the row, so the second flush waits and adds to 9. The app never reads the old value. The in-memory store has no database to lean on and needs `AddOrUpdate` or a lock to be just as atomic.
+</details>
+
+<details><summary>Why is <code>HashSet&lt;DailyClicks&gt;</code> the wrong way to keep duplicates out of a batch?</summary>
+
+Records compare every property, `Count` included. `(abc, 5 Nov, 3)` and `(abc, 5 Nov, 2)` are different, so both stay and break the upsert (Postgres won't update the same row twice in one statement). `(abc, 5 Nov, 3)` twice is equal, so one is dropped and 3 real clicks are lost. Each entry means "add n", so there's nothing to dedupe: group by (code, day) and sum. Two identical entries are wrong only on a retry of a batch that may have committed, which is idempotency; for analytics, don't retry it.
+</details>
+
+<details><summary>A batch has an entry with <code>Count = 0</code>; another has clicks for a link the sweeper just deleted. Why does one throw and the other not?</summary>
+
+A zero or negative count can only come from a bug in the caller, so reject the whole batch before writing anything: a half-applied batch hides the bug and the caller can't tell what landed. A missing link happens in a correct system (links expire while clicks wait in memory), so the upsert skips that row (`JOIN links`) and writes the rest. Failing the batch would lose every other code's clicks over something nobody did wrong.
+</details>
+
+<details><summary><code>click_stats</code> has <code>primary key (code, day)</code>. Is that one column? Why that order, and why <code>ON DELETE CASCADE</code> to <code>links</code>?</summary>
+
+Two columns, plus a unique constraint (which `ON CONFLICT` needs) and a B-tree index sorted by code, then day. `code = 'abc' AND day BETWEEN ...` reads one contiguous range of that index; with `(day, code)` the rows for one code would be scattered. Equality column first, range column second. Cascade because a swept code can go to a new link (`Swept_code_can_be_added_again`): with no FK the new link inherits the old clicks, and with an FK but no cascade the sweeper's delete fails.
+</details>
+
+<details><summary>A new abstract contract class with one real test and 13 empty ones. What does <code>dotnet test</code> report, before and after adding the in-memory subclass?</summary>
+
+Before: "No test matches", because xUnit doesn't run tests in an abstract class, so the `NotImplementedException` store was never called. After: 1 failed, 14 passed, because an empty test passes (the Theory counts once per `InlineData`). Green that checks nothing hides which tests are unwritten. Mark them `[Fact(Skip = "todo")]` until written, so they show as skipped.
+</details>
