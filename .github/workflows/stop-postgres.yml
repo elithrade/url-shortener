@@ -33,6 +33,10 @@ jobs:
       - name: Stop Postgres
         run: |
           server=$(az postgres flexible-server list -g "$RG" --query "[0].name" -o tsv)
+          if [ -z "$server" ]; then
+            echo "postgres: none (deleted by delete-postgres.yml)"
+            exit 0
+          fi
           state=$(az postgres flexible-server show -g "$RG" -n "$server" --query state -o tsv)
           echo "postgres: $state"
           if [ "$state" = "Ready" ]; then

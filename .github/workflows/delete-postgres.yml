@@ -1,0 +1,44 @@
+# Delete the Postgres server, data and all, to stop paying for its storage during a long break.
+# Nothing else changes: the next deploy (deploy.yml) sees the server is missing, recreates it from
+# main.bicep with the same name and password, and migrates the empty database.
+name: delete postgres
+
+on:
+  workflow_dispatch: # by hand only
+    inputs:
+      confirm:
+        description: 'Deletes every stored link. Type "delete" to confirm.'
+        required: true
+
+# shares deploy.yml's group, so it never deletes the database in the middle of a deploy
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # OIDC sign-in, same identity as deploy.yml
+
+env:
+  RG: rg-shortener
+
+jobs:
+  delete:
+    if: inputs.confirm == 'delete'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Delete Postgres
+        run: |
+          server=$(az postgres flexible-server list -g "$RG" --query "[0].name" -o tsv)
+          if [ -z "$server" ]; then
+            echo "postgres: none"
+            exit 0
+          fi
+          az postgres flexible-server delete -g "$RG" -n "$server" --yes -o none
+          echo "postgres: deleted"

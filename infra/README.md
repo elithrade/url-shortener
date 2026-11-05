@@ -146,7 +146,11 @@ Job logs: portal → the job → Execution history → Console logs, or `az cont
 
 Measured in `australiaeast` (no free offer on this account): B1MS compute about AU$0.037 an hour (about AU$27 a month if it never stops), 32 GB of storage about AU$6.30 a month whether running or not, Log Analytics within its free 5 GB.
 
-`.github/workflows/stop-postgres.yml` stops the server every night (14:00 UTC), and `deploy.yml` starts it before migrating, so a push never fails on a stopped database. Start it by hand to use the app between deploys. GitHub disables scheduled workflows in a public repo after 60 days without activity; re-enable it from the Actions tab.
+`.github/workflows/stop-postgres.yml` stops the server every night (14:00 UTC), and `deploy.yml` starts it before migrating, so a push never fails on a stopped database. Start it by hand to use the app between deploys.
+
+Storage can't shrink below 32 GB, so the only way to stop paying for it is to delete the server. For a long break, run `.github/workflows/delete-postgres.yml` by hand (type `delete` to confirm). It removes every stored link. The next deploy finds no server, runs the template first to recreate it with the same name and password, then migrates as usual, about 5 to 10 minutes longer than a normal deploy. Delete only the server, never the resource group: the deploy identity lives in it.
+
+GitHub disables scheduled workflows in a public repo after 60 days without activity; re-enable it from the Actions tab.
 
 
 ```bash
