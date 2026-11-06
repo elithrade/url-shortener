@@ -17,10 +17,27 @@ namespace Shortener
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.13")
+                .HasAnnotation("ProductVersion", "10.0.4")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("Shortener.ClickStatRecord", b =>
+                {
+                    b.Property<string>("Code")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<DateOnly>("Day")
+                        .HasColumnType("date");
+
+                    b.Property<long>("Count")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Code", "Day");
+
+                    b.ToTable("click_stats", (string)null);
+                });
 
             modelBuilder.Entity("Shortener.LinkRecord", b =>
                 {
@@ -41,6 +58,15 @@ namespace Shortener
                     b.HasIndex("ExpiresAt");
 
                     b.ToTable("links", (string)null);
+                });
+
+            modelBuilder.Entity("Shortener.ClickStatRecord", b =>
+                {
+                    b.HasOne("Shortener.LinkRecord", null)
+                        .WithMany()
+                        .HasForeignKey("Code")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 #pragma warning restore 612, 618
         }

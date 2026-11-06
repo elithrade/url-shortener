@@ -1230,3 +1230,80 @@ GitHub sent the subject in its newer form, which carries the numeric IDs: `repo:
 
 They are identifiers: which identity, which directory, where to deploy. Knowing all three doesn't let anyone sign in without a GitHub-signed token for this repo's `main`. They go in secrets rather than variables because the repo is public, so its Actions logs are public, and secrets are masked there (`***`) while variables print in clear.
 </details>
+
+<details><summary>Postgres B1ms with no free offer: stopping it nightly cuts compute, but storage still costs about AU$6.30 a month. Can you shrink the 32 GB, and what's the alternative?</summary>
+
+No. 32 GB is the smallest size for both storage types (Premium SSD and SSD v2), and Flexible Server storage can only grow. The only way to stop paying for it is to delete the server: `delete-postgres.yml` does that, and the next deploy finds no server, runs the template first to recreate it (same name from `uniqueString`, same password from the secret), then migrates. The data is gone, and the deploy takes about 12 minutes instead of 5. Delete the server, never the resource group: the deploy identity lives in it. Cost analysis lags up to a day, so a rise after stopping is usually old usage arriving late.
+</details>
+
+<details><summary>The repo is public. Who can run its workflows, and why can't a fork's pull request reach Azure?</summary>
+
+Running a workflow by hand needs write access; scheduled and push runs come only from this repo's `main`. A fork's pull request can trigger `ci.yml`, but that run gets no secrets, a read-only token and no OIDC token, and the federated credential only trusts `main` of this repo anyway. The `workflow_run` guard in `deploy.yml` stops a fork's CI from triggering a deploy. What's left is wasted runner minutes, which approval for all external contributors closes.
+</details>
+
+## 27. Click analytics: the click store
+
+<details><summary>Clicks go redirect → channel → consumer → <code>IClickStore</code>. Where are they counted, and can stats be read before a flush?</summary>
+
+In two places. The consumer (a `BackgroundService`) sums clicks per (code, day) in memory for one interval; the flush calls `AddAsync`, which adds those sums to the stored totals for good. The redirect only does `TryWrite` and never waits for the database. Stats are eventually consistent: up to one flush interval behind. Accepted on purpose, because the redirect stays fast and 1,000 clicks become one upsert. A crash loses up to one interval of clicks, which is fine for analytics and not for links, so `IUrlStore` writes synchronously. The question that decides sync or async: how much loss can you tolerate?
+</details>
+
+<details><summary>Two flushes add to the same (code, day) row at once. Why not read the count, add in C#, and write it back?</summary>
+
+Lost update: both read 5, one writes 9, the other writes 7, and 4 clicks are gone (check-then-set again). Let the database do it in one statement: `INSERT ... ON CONFLICT (code, day) DO UPDATE SET count = click_stats.count + excluded.count`. Postgres locks the row, so the second flush waits and adds to 9. The app never reads the old value. The in-memory store has no database to lean on and needs `AddOrUpdate` or a lock to be just as atomic.
+</details>
+
+<details><summary>Why is <code>HashSet&lt;DailyClicks&gt;</code> the wrong way to keep duplicates out of a batch?</summary>
+
+Records compare every property, `Count` included. `(abc, 5 Nov, 3)` and `(abc, 5 Nov, 2)` are different, so both stay and break the upsert (Postgres won't update the same row twice in one statement). `(abc, 5 Nov, 3)` twice is equal, so one is dropped and 3 real clicks are lost. Each entry means "add n", so there's nothing to dedupe: group by (code, day) and sum. Two identical entries are wrong only on a retry of a batch that may have committed, which is idempotency; for analytics, don't retry it.
+</details>
+
+<details><summary>A batch has an entry with <code>Count = 0</code>; another has clicks for a link the sweeper just deleted. Why does one throw and the other not?</summary>
+
+A zero or negative count can only come from a bug in the caller, so reject the whole batch before writing anything: a half-applied batch hides the bug and the caller can't tell what landed. A missing link happens in a correct system (links expire while clicks wait in memory), so the upsert skips that row (`JOIN links`) and writes the rest. Failing the batch would lose every other code's clicks over something nobody did wrong.
+</details>
+
+<details><summary><code>click_stats</code> has <code>primary key (code, day)</code>. Is that one column? Why that order, and why <code>ON DELETE CASCADE</code> to <code>links</code>?</summary>
+
+Two columns, plus a unique constraint (which `ON CONFLICT` needs) and a B-tree index sorted by code, then day. `code = 'abc' AND day BETWEEN ...` reads one contiguous range of that index; with `(day, code)` the rows for one code would be scattered. Equality column first, range column second. Cascade because a swept code can go to a new link (`Swept_code_can_be_added_again`): with no FK the new link inherits the old clicks, and with an FK but no cascade the sweeper's delete fails.
+</details>
+
+<details><summary>A new abstract contract class with one real test and 13 empty ones. What does <code>dotnet test</code> report, before and after adding the in-memory subclass?</summary>
+
+Before: "No test matches", because xUnit doesn't run tests in an abstract class, so the `NotImplementedException` store was never called. After: 1 failed, 14 passed, because an empty test passes (the Theory counts once per `InlineData`). Green that checks nothing hides which tests are unwritten. Mark them `[Fact(Skip = "todo")]` until written, so they show as skipped.
+</details>
+
+<details><summary>A range test puts clicks on 1 Jan 2026 and checks that a query for 1 Jan 2006 returns 0. Change <code>day &lt;= end</code> to <code>day &lt;= end.AddDays(1)</code>: does it catch that?</summary>
+
+No. A day 20 years away is outside the range by any measure, so off-by-one mutations at either end passed it, and no other test caught them either. Put clicks on the day just before `start` and just after `end`, plus one inside, and expect only the inside count: both mutations then go red. The same rule as for `start > end` (one day apart, not `MaxValue` and `MinValue`) and for the count (test 0, not only -1): test the smallest input that breaks the rule.
+</details>
+
+<details><summary>A concurrency test for "concurrent adds lose nothing" gives each task a batch of random codes. Why can it never fail, and what does a test that can fail look like?</summary>
+
+A lost update needs two writers on the same key; random codes never overlap, so there's nothing to race on. Every task adds to one fixed (code, day), many times, released together by a gate, and the expected total is tasks × adds × count. Checked by mutation: replacing `AddOrUpdate` with `_counts[key] = _counts.GetValueOrDefault(key) + n` read 40,890 of 100,000, and failed 3 runs out of 3.
+</details>
+
+<details><summary><code>CreateBatch(code, day, int.MaxValue, 2)</code> was meant to build 2 entries of <code>int.MaxValue</code>. What happened, and what prevents it?</summary>
+
+The third parameter is the batch size, so it built a list of 2.1 billion records: the test host reached about 20 GB and pegged the CPU until it was killed. Two adjacent `int` parameters can't be told apart by the compiler, and the swap was made twice. Pass them by name (`batchSize: 2, countPerAdd: int.MaxValue`), as with `peer:` in section 25. The expected value had the same family of bug: `int.MaxValue * 10` overflows in `int` before anything widens it; write `10L * int.MaxValue`.
+</details>
+
+<details><summary><code>Assert.ThrowsAnyAsync&lt;ArgumentException&gt;</code> vs <code>Assert.ThrowsAsync&lt;ArgumentException&gt;</code>: which one checks the type you chose?</summary>
+
+`ThrowsAsync<T>` requires exactly `T`; `ThrowsAnyAsync<T>` also accepts any subclass, so it passes if the store throws `ArgumentOutOfRangeException` where you decided on plain `ArgumentException`. Use the exact one for a type you chose on purpose. Related: the `paramName` of an argument exception must be one of the method's parameters (CA2208), so a bad `Count` inside the `clicks` batch is `new ArgumentOutOfRangeException(nameof(clicks), "Count must be greater than zero")`.
+</details>
+
+<details><summary>EF Core has no upsert. How does <code>PostgresClickStore.AddAsync</code> write a batch, and why must the SQL not go through a <code>var</code>?</summary>
+
+One raw statement through `db.Database.ExecuteSqlAsync`: `unnest` turns three arrays (codes, days, counts) into rows, `JOIN links` drops codes without a link, `GROUP BY` sums duplicates, and `ON CONFLICT ("Code", "Day") DO UPDATE SET "Count" = click_stats."Count" + EXCLUDED."Count"` adds. Written straight into the call (or into a `FormattableString`), `$"""...{codes}..."""` stays a template and EF sends each hole as a parameter. `var sql = $"..."` makes a plain `string` with the values pasted in, which is SQL built by concatenation; `ExecuteSqlAsync` refuses it at compile time, and `ExecuteSqlRawAsync` would accept it. Columns created by EF are PascalCase, so raw SQL must quote them.
+</details>
+
+<details><summary>Is a <code>DbContext</code> one table? Why do the click stats share <code>ShortenerDbContext</code> instead of getting a <code>ClicksDbContext</code>?</summary>
+
+A `DbContext` is a session with the whole database; each `DbSet<T>` (`Links`, `ClickStats`) is one table. Split contexts along databases, not features: a second context couldn't declare the FK to `links` without mapping that table twice, would bring a second migration history whose order nothing enforces, and the `migrate` step runs one context. The feature boundary is `IClickStore`. Create one short-lived context per operation from the factory; it isn't thread-safe, and the connections come from the pool anyway.
+</details>
+
+<details><summary>After the click store's concurrency test was added, <code>Ready_when_postgres_reachable_returns_200</code> returned 503 in every full run but passed alone. Why?</summary>
+
+Most likely connection exhaustion: 1,000 concurrent adds filled Npgsql's pool (100 connections by default), and the pool keeps them open while idle. Postgres allows 100 in all, and the app under test adds timeouts to the connection string, so it has a different string, its own pool, and was refused. It passed with every other click test and failed only when paired with the concurrency test. `NpgsqlConnection.ClearAllPools()` after each test fixed it (3 full runs green). In production the same rule applies: replicas × Max Pool Size must stay under the server's limit (about 50 on B1ms).
+</details>
