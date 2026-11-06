@@ -1272,3 +1272,23 @@ Two columns, plus a unique constraint (which `ON CONFLICT` needs) and a B-tree i
 
 Before: "No test matches", because xUnit doesn't run tests in an abstract class, so the `NotImplementedException` store was never called. After: 1 failed, 14 passed, because an empty test passes (the Theory counts once per `InlineData`). Green that checks nothing hides which tests are unwritten. Mark them `[Fact(Skip = "todo")]` until written, so they show as skipped.
 </details>
+
+<details><summary>A range test puts clicks on 1 Jan 2026 and checks that a query for 1 Jan 2006 returns 0. Change <code>day &lt;= end</code> to <code>day &lt;= end.AddDays(1)</code>: does it catch that?</summary>
+
+No. A day 20 years away is outside the range by any measure, so off-by-one mutations at either end passed it, and no other test caught them either. Put clicks on the day just before `start` and just after `end`, plus one inside, and expect only the inside count: both mutations then go red. The same rule as for `start > end` (one day apart, not `MaxValue` and `MinValue`) and for the count (test 0, not only -1): test the smallest input that breaks the rule.
+</details>
+
+<details><summary>A concurrency test for "concurrent adds lose nothing" gives each task a batch of random codes. Why can it never fail, and what does a test that can fail look like?</summary>
+
+A lost update needs two writers on the same key; random codes never overlap, so there's nothing to race on. Every task adds to one fixed (code, day), many times, released together by a gate, and the expected total is tasks × adds × count. Checked by mutation: replacing `AddOrUpdate` with `_counts[key] = _counts.GetValueOrDefault(key) + n` read 40,890 of 100,000, and failed 3 runs out of 3.
+</details>
+
+<details><summary><code>CreateBatch(code, day, int.MaxValue, 2)</code> was meant to build 2 entries of <code>int.MaxValue</code>. What happened, and what prevents it?</summary>
+
+The third parameter is the batch size, so it built a list of 2.1 billion records: the test host reached about 20 GB and pegged the CPU until it was killed. Two adjacent `int` parameters can't be told apart by the compiler, and the swap was made twice. Pass them by name (`batchSize: 2, countPerAdd: int.MaxValue`), as with `peer:` in section 25. The expected value had the same family of bug: `int.MaxValue * 10` overflows in `int` before anything widens it; write `10L * int.MaxValue`.
+</details>
+
+<details><summary><code>Assert.ThrowsAnyAsync&lt;ArgumentException&gt;</code> vs <code>Assert.ThrowsAsync&lt;ArgumentException&gt;</code>: which one checks the type you chose?</summary>
+
+`ThrowsAsync<T>` requires exactly `T`; `ThrowsAnyAsync<T>` also accepts any subclass, so it passes if the store throws `ArgumentOutOfRangeException` where you decided on plain `ArgumentException`. Use the exact one for a type you chose on purpose. Related: the `paramName` of an argument exception must be one of the method's parameters (CA2208), so a bad `Count` inside the `clicks` batch is `new ArgumentOutOfRangeException(nameof(clicks), "Count must be greater than zero")`.
+</details>
