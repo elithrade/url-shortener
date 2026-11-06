@@ -1292,3 +1292,18 @@ The third parameter is the batch size, so it built a list of 2.1 billion records
 
 `ThrowsAsync<T>` requires exactly `T`; `ThrowsAnyAsync<T>` also accepts any subclass, so it passes if the store throws `ArgumentOutOfRangeException` where you decided on plain `ArgumentException`. Use the exact one for a type you chose on purpose. Related: the `paramName` of an argument exception must be one of the method's parameters (CA2208), so a bad `Count` inside the `clicks` batch is `new ArgumentOutOfRangeException(nameof(clicks), "Count must be greater than zero")`.
 </details>
+
+<details><summary>EF Core has no upsert. How does <code>PostgresClickStore.AddAsync</code> write a batch, and why must the SQL not go through a <code>var</code>?</summary>
+
+One raw statement through `db.Database.ExecuteSqlAsync`: `unnest` turns three arrays (codes, days, counts) into rows, `JOIN links` drops codes without a link, `GROUP BY` sums duplicates, and `ON CONFLICT ("Code", "Day") DO UPDATE SET "Count" = click_stats."Count" + EXCLUDED."Count"` adds. Written straight into the call (or into a `FormattableString`), `$"""...{codes}..."""` stays a template and EF sends each hole as a parameter. `var sql = $"..."` makes a plain `string` with the values pasted in, which is SQL built by concatenation; `ExecuteSqlAsync` refuses it at compile time, and `ExecuteSqlRawAsync` would accept it. Columns created by EF are PascalCase, so raw SQL must quote them.
+</details>
+
+<details><summary>Is a <code>DbContext</code> one table? Why do the click stats share <code>ShortenerDbContext</code> instead of getting a <code>ClicksDbContext</code>?</summary>
+
+A `DbContext` is a session with the whole database; each `DbSet<T>` (`Links`, `ClickStats`) is one table. Split contexts along databases, not features: a second context couldn't declare the FK to `links` without mapping that table twice, would bring a second migration history whose order nothing enforces, and the `migrate` step runs one context. The feature boundary is `IClickStore`. Create one short-lived context per operation from the factory; it isn't thread-safe, and the connections come from the pool anyway.
+</details>
+
+<details><summary>After the click store's concurrency test was added, <code>Ready_when_postgres_reachable_returns_200</code> returned 503 in every full run but passed alone. Why?</summary>
+
+Most likely connection exhaustion: 1,000 concurrent adds filled Npgsql's pool (100 connections by default), and the pool keeps them open while idle. Postgres allows 100 in all, and the app under test adds timeouts to the connection string, so it has a different string, its own pool, and was refused. It passed with every other click test and failed only when paired with the concurrency test. `NpgsqlConnection.ClearAllPools()` after each test fixed it (3 full runs green). In production the same rule applies: replicas × Max Pool Size must stay under the server's limit (about 50 on B1ms).
+</details>

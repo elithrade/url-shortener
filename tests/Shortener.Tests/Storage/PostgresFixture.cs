@@ -37,7 +37,7 @@ public sealed class PostgresFixture : IAsyncLifetime
     public async Task ResetAsync()
     {
         await using var db = await Factory.CreateDbContextAsync();
-        await db.Database.ExecuteSqlRawAsync("TRUNCATE TABLE links");
+        await db.Database.ExecuteSqlRawAsync("TRUNCATE TABLE click_stats, links");
     }
 
     // A new database in the same container with no tables, so a test can prove the migrator creates the schema.

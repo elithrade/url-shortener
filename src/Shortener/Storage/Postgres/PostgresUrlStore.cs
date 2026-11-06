@@ -11,23 +11,6 @@ public sealed class PostgresUrlStore(
     private readonly IDbContextFactory<ShortenerDbContext> _factory = factory;
     private readonly TimeProvider _clock = clock;
 
-    // EF wraps a transient failure in an InvalidOperationException, so the NpgsqlException is found in the inner chain.
-    private static bool IsUnavailable(Exception ex)
-    {
-        for (var e = ex; e is not null; e = e.InnerException)
-        {
-            if (e is NpgsqlException { IsTransient: true })
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static StorageUnavailableException Unavailable(Exception inner) =>
-        new("Storage is unavailable", inner);
-
     public async ValueTask<string?> GetAsync(string code, CancellationToken ct)
     {
         var now = _clock.GetUtcNow();
@@ -43,9 +26,9 @@ public sealed class PostgresUrlStore(
                 .Select(r => r.Url)
                 .FirstOrDefaultAsync(ct);
         }
-        catch (Exception ex) when (IsUnavailable(ex))
+        catch (Exception ex) when (ex.IsUnavailable())
         {
-            throw Unavailable(ex);
+            throw ex.Unavailable();
         }
     }
 
@@ -60,9 +43,9 @@ public sealed class PostgresUrlStore(
                 .Links.Where(r => r.ExpiresAt != null && r.ExpiresAt <= now)
                 .ExecuteDeleteAsync(ct);
         }
-        catch (Exception ex) when (IsUnavailable(ex))
+        catch (Exception ex) when (ex.IsUnavailable())
         {
-            throw Unavailable(ex);
+            throw ex.Unavailable();
         }
     }
 
@@ -105,9 +88,9 @@ public sealed class PostgresUrlStore(
         {
             return false;
         }
-        catch (Exception ex) when (IsUnavailable(ex))
+        catch (Exception ex) when (ex.IsUnavailable())
         {
-            throw Unavailable(ex);
+            throw ex.Unavailable();
         }
     }
 }
