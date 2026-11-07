@@ -1307,3 +1307,10 @@ A `DbContext` is a session with the whole database; each `DbSet<T>` (`Links`, `C
 
 Most likely connection exhaustion: 1,000 concurrent adds filled Npgsql's pool (100 connections by default), and the pool keeps them open while idle. Postgres allows 100 in all, and the app under test adds timeouts to the connection string, so it has a different string, its own pool, and was refused. It passed with every other click test and failed only when paired with the concurrency test. `NpgsqlConnection.ClearAllPools()` after each test fixed it (3 full runs green). In production the same rule applies: replicas × Max Pool Size must stay under the server's limit (about 50 on B1ms).
 </details>
+
+## 28. Click analytics: the channel and async
+
+<details><summary>Does <code>await</code> make a slow database call faster? What does it actually buy you?</summary>
+
+No. The next line still waits for the result, so latency stays the same. What changes is that no thread is held while waiting: the method returns, the thread serves other requests, and the rest of the method runs as a callback when the I/O completes (possibly on a different thread). So `await` improves throughput, not latency. It only helps when the wait is I/O; CPU-bound work still occupies a thread. To overlap independent calls, start them all and then `await Task.WhenAll`. To take a wait out of the request path entirely, hand the work to a background consumer, which is what the click channel does.
+</details>
