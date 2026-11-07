@@ -9,26 +9,19 @@ public class InMemoryStoreTests
     [Fact]
     public async Task Store_guarantees_uniqueness_under_contention()
     {
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var store = new InMemoryUrlStore(_fakeTimeProvider);
         var baseUrl = "https://example.com/";
 
-        // simulate starting all 1000 tasks at once trying to add to the store
-        var tasks = Enumerable
-            .Range(0, 1000)
-            .Select(i =>
-                Task.Run(async () =>
-                {
-                    await gate.Task;
-                    var linkEntry = new LinkEntry(baseUrl + i, null);
-                    return await store.TryAddAsync("same", linkEntry, CancellationToken.None);
-                })
-            )
-            .ToArray();
-
-        // release all
-        gate.SetResult();
-        bool[] results = await Task.WhenAll(tasks);
+        // 1000 tasks released at once, all trying to add the same key
+        bool[] results = await Concurrently.RunAsync(
+            1000,
+            async i =>
+                await store.TryAddAsync(
+                    "same",
+                    new LinkEntry(baseUrl + i, null),
+                    CancellationToken.None
+                )
+        );
 
         Assert.Equal(1000, results.Length);
         Assert.Equal(1, results.Count(x => x));
@@ -40,36 +33,26 @@ public class InMemoryStoreTests
     [Fact]
     public async Task Distinct_keys_are_all_stored()
     {
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var store = new InMemoryUrlStore(_fakeTimeProvider);
         var baseUrl = "https://example.com/";
 
-        // simulate starting all 1000 tasks at once trying to add to the store
-        var tasks = Enumerable
-            .Range(0, 1000)
-            .Select(i =>
-                Task.Run(async () =>
+        // 1000 tasks released at once, each adding its own unique keys
+        bool[] results = await Concurrently.RunAsync(
+            1000,
+            async i =>
+            {
+                bool allAdded = true;
+                for (int j = 0; j < 10; j++)
                 {
-                    await gate.Task;
+                    var key = $"k{i}-{j}";
+                    var linkEntry = new LinkEntry(baseUrl + key, null);
 
-                    bool allAdded = true;
-                    // each task adds unique keys
-                    for (int j = 0; j < 10; j++)
-                    {
-                        var key = $"k{i}-{j}";
-                        var linkEntry = new LinkEntry(baseUrl + key, null);
+                    allAdded &= await store.TryAddAsync(key, linkEntry, CancellationToken.None);
+                }
 
-                        allAdded &= await store.TryAddAsync(key, linkEntry, CancellationToken.None);
-                    }
-
-                    return allAdded;
-                })
-            )
-            .ToArray();
-
-        // release and run all
-        gate.SetResult();
-        bool[] results = await Task.WhenAll(tasks);
+                return allAdded;
+            }
+        );
 
         Assert.All(results, Assert.True);
 

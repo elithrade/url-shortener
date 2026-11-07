@@ -191,24 +191,14 @@ public abstract class ClickStoreContractTests
         const int taskCount = 1000;
 
         var day = new DateOnly(2026, 1, 1);
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var tasks = Enumerable
-            .Range(0, taskCount)
-            .Select(_ =>
-                Task.Run(async () =>
-                {
-                    await gate.Task;
-                    await store.AddAsync(
-                        CreateBatch(code, day, batchSize, countPerAdd),
-                        CancellationToken.None
-                    );
-                })
-            )
-            .ToArray();
-
-        // release all
-        gate.SetResult();
-        await Task.WhenAll(tasks);
+        await Concurrently.RunAsync(
+            taskCount,
+            async _ =>
+                await store.AddAsync(
+                    CreateBatch(code, day, batchSize, countPerAdd),
+                    CancellationToken.None
+                )
+        );
 
         var expected = taskCount * batchSize * countPerAdd;
         Assert.Equal(expected, await store.GetAsync(code, day, day, CancellationToken.None));

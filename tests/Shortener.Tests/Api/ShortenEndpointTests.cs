@@ -180,33 +180,24 @@ public class ShortenEndpointTests : IClassFixture<GenerousRateLimitFactory>
     [Fact]
     public async Task Concurrent_posts_get_distinct_codes_that_resolve_to_their_own_urls()
     {
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var baseUrl = "https://example.com/";
 
-        // simulate starting all 200 tasks at once trying to add to the store
-        var tasks = Enumerable
-            .Range(0, 200)
-            .Select(i =>
-                Task.Run(async () =>
-                {
-                    await gate.Task;
+        // 200 posts released at once, all trying to add to the store
+        var results = await Concurrently.RunAsync(
+            200,
+            async i =>
+            {
+                var key = $"k{i}";
+                var response = await _client.PostAsJsonAsync(
+                    "/shorten",
+                    new { url = baseUrl + key }
+                );
+                var status = response.StatusCode;
+                var code = (await response.Content.ReadFromJsonAsync<ShortenResponse>())?.Code;
 
-                    var key = $"k{i}";
-                    var response = await _client.PostAsJsonAsync(
-                        "/shorten",
-                        new { url = baseUrl + key }
-                    );
-                    var status = response.StatusCode;
-                    var code = (await response.Content.ReadFromJsonAsync<ShortenResponse>())?.Code;
-
-                    return (i, status, code);
-                })
-            )
-            .ToArray();
-
-        // release and run all
-        gate.SetResult();
-        var results = await Task.WhenAll(tasks);
+                return (i, status, code);
+            }
+        );
 
         Assert.All(results, r => Assert.Equal(HttpStatusCode.Created, r.status));
         Assert.Equal(200, results.Select(r => r.code).Distinct().Count());
