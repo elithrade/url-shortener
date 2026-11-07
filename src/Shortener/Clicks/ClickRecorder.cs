@@ -32,7 +32,7 @@ public sealed class ClickRecorder
         }
     }
 
-    public long Dropped => _dropped;
+    public long Dropped => Interlocked.Read(ref _dropped);
 
     public ChannelReader<Click> Reader => _channel.Reader;
 }
