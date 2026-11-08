@@ -3,41 +3,32 @@ namespace Shortener.Tests;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 
-public class ExpirySweepServiceTests
+public class ExpirySweepServiceTests : IAsyncLifetime
 {
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(60);
+    private ExpirySweepService? _service;
 
-    private static (
-        FakeTimeProvider Clock,
-        FakeSweeper Sweeper,
-        ExpirySweepService Service
-    ) Create()
+    private (FakeTimeProvider Clock, FakeSweeper Sweeper, ExpirySweepService Service) Create()
     {
         var clock = new FakeTimeProvider(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
         var sweeper = new FakeSweeper();
 
-        return (
-            clock,
+        var service = new ExpirySweepService(
             sweeper,
-            new ExpirySweepService(sweeper, clock, NullLogger<ExpirySweepService>.Instance)
+            clock,
+            NullLogger<ExpirySweepService>.Instance
         );
+
+        _service = service;
+
+        return (clock, sweeper, service);
     }
 
-    private static async Task AdvanceUntilFirstSweepAsync(
-        FakeTimeProvider clock,
-        FakeSweeper sweeper
-    )
-    {
-        for (var attempt = 0; attempt < 10; attempt++)
-        {
-            clock.Advance(Interval);
-            if (await sweeper.WaitForCallAsync(TimeSpan.FromMilliseconds(500)))
-            {
-                return;
-            }
-        }
-        throw new TimeoutException("The service never swept");
-    }
+    private static Task AdvanceUntilFirstSweepAsync(FakeTimeProvider clock, FakeSweeper sweeper) =>
+        clock.AdvanceUntilAsync(
+            Interval,
+            () => sweeper.WaitForCallAsync(TimeSpan.FromMilliseconds(500))
+        );
 
     [Fact]
     public async Task Sweep_once_per_interval_not_before()
@@ -45,23 +36,16 @@ public class ExpirySweepServiceTests
         var (clock, sweeper, service) = Create();
         await service.StartAsync(CancellationToken.None);
 
-        try
-        {
-            await AdvanceUntilFirstSweepAsync(clock, sweeper);
+        await AdvanceUntilFirstSweepAsync(clock, sweeper);
 
-            for (var round = 1; round <= 3; round++)
-            {
-                clock.Advance(Interval - TimeSpan.FromSeconds(1));
-                // 59s, too early
-                Assert.False(await sweeper.WaitForCallAsync(TimeSpan.FromMilliseconds(100)));
-
-                clock.Advance(TimeSpan.FromSeconds(1));
-                Assert.True(await sweeper.WaitForCallAsync());
-            }
-        }
-        finally
+        for (var round = 1; round <= 3; round++)
         {
-            await service.StopAsync(CancellationToken.None);
+            clock.Advance(Interval - TimeSpan.FromSeconds(1));
+            // 59s, too early
+            Assert.False(await sweeper.WaitForCallAsync(TimeSpan.FromMilliseconds(100)));
+
+            clock.Advance(TimeSpan.FromSeconds(1));
+            Assert.True(await sweeper.WaitForCallAsync());
         }
     }
 
@@ -75,20 +59,13 @@ public class ExpirySweepServiceTests
 
         await service.StartAsync(CancellationToken.None);
 
-        try
-        {
-            // the first sweep throws; this waits until it has happened
-            await AdvanceUntilFirstSweepAsync(clock, sweeper);
-            Assert.Equal(1, sweeper.Calls);
+        // the first sweep throws; this waits until it has happened
+        await AdvanceUntilFirstSweepAsync(clock, sweeper);
+        Assert.Equal(1, sweeper.Calls);
 
-            clock.Advance(Interval);
-            Assert.True(await sweeper.WaitForCallAsync());
-            Assert.Equal(2, sweeper.Calls);
-        }
-        finally
-        {
-            await service.StopAsync(CancellationToken.None);
-        }
+        clock.Advance(Interval);
+        Assert.True(await sweeper.WaitForCallAsync());
+        Assert.Equal(2, sweeper.Calls);
     }
 
     [Fact]
@@ -108,5 +85,15 @@ public class ExpirySweepServiceTests
         clock.Advance(Interval);
         Assert.False(await sweeper.WaitForCallAsync(TimeSpan.FromMilliseconds(100)));
         Assert.Equal(1, sweeper.Calls);
+    }
+
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    public async Task DisposeAsync()
+    {
+        if (_service is not null)
+        {
+            await _service.StopAsync(CancellationToken.None);
+        }
     }
 }

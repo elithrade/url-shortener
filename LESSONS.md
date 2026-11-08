@@ -1307,3 +1307,35 @@ A `DbContext` is a session with the whole database; each `DbSet<T>` (`Links`, `C
 
 Most likely connection exhaustion: 1,000 concurrent adds filled Npgsql's pool (100 connections by default), and the pool keeps them open while idle. Postgres allows 100 in all, and the app under test adds timeouts to the connection string, so it has a different string, its own pool, and was refused. It passed with every other click test and failed only when paired with the concurrency test. `NpgsqlConnection.ClearAllPools()` after each test fixed it (3 full runs green). In production the same rule applies: replicas × Max Pool Size must stay under the server's limit (about 50 on B1ms).
 </details>
+
+## 28. Click analytics: the channel and async
+
+<details><summary>Does <code>await</code> make a slow database call faster? What does it actually buy you?</summary>
+
+No. The next line still waits for the result, so latency stays the same. What changes is that no thread is held while waiting: the method returns, the thread serves other requests, and the rest of the method runs as a callback when the I/O completes (possibly on a different thread). So `await` improves throughput, not latency. It only helps when the wait is I/O; CPU-bound work still occupies a thread. To overlap independent calls, start them all and then `await Task.WhenAll`. To take a wait out of the request path entirely, hand the work to a background consumer, which is what the click channel does.
+</details>
+
+<details><summary>A <code>PeriodicTimer</code> takes no callback. What runs when it ticks?</summary>
+
+Nothing. A tick only completes the pending `WaitForNextTickAsync`, waking whoever awaits it; the "action" is the code after that `await`. A missed tick is remembered (several collapse into one), and only one wait may be pending at a time, so a loop waiting on a timer and a channel keeps the tick task across iterations instead of asking again. A callback timer (`System.Threading.Timer`) would run on another thread at the same time as the read loop and race on the dictionary.
+</details>
+
+<details><summary>The flush loop awaited <code>Task.WhenAny(tick, read)</code>, and after the first empty tick the test run hung with a CPU at 100%. Why?</summary>
+
+The tick task was re-armed only inside `if (ticked && entries.Count > 0)`. After a tick with nothing collected, `tick` stayed completed, so every later `WhenAny` returned at once and the loop never slept again. Every task that completed must be replaced on every wake-up (`read` the same), whether or not anything was flushed. Two more rules for these tasks: convert a `ValueTask` with `.AsTask()` once, since a `ValueTask` may be consumed only once, and test `tick.IsCompletedSuccessfully`, because a cancelled tick is also "completed".
+</details>
+
+<details><summary><code>while (clicks.TryRead(out var click) &amp;&amp; entries.Count &lt;= max)</code>: what two bugs, and what third one survives the tests?</summary>
+
+`TryRead` runs first and removes the click; when the count check then fails, that click is lost. And `<=` lets the batch grow to max + 1. Check the cap first, `entries.Count < max && TryRead(...)`, because `&&` stops at the first `false`. The third: entries count distinct (code, day) pairs, so one hot link under constant writes never reaches the cap and the take never ends. Take at most the `Count` snapshot read before the loop. Removing that snapshot passed every test (liveness under load is not covered).
+</details>
+
+<details><summary>On shutdown, <code>WhenAny</code> does not throw. Why does the loop still need <code>catch (OperationCanceledException) when (ct.IsCancellationRequested)</code>?</summary>
+
+Usually the loop sleeps in `WhenAny`, which returns when its tasks are cancelled, and the `while (!ct.IsCancellationRequested)` check ends it. But if shutdown comes during a flush, `AddAsync(batch, ct)` throws, and the exception would jump past the drain after the loop. The empty `catch` turns that into "carry on to the drain". The drain then uses its own deadline token, not the cancelled `ct`.
+</details>
+
+<details><summary>The drain test passed alone and failed in every full run. Why?</summary>
+
+In .NET 10 `StartAsync` runs `ExecuteAsync` through `Task.Run` tied to the stopping token. The test started, wrote a click and stopped within microseconds; in a busy full run the token was cancelled before that work started, so `ExecuteAsync` (and its drain) never ran (probe: `ExecuteTask` was `Canceled`; alone it ran, already cancelled). The test now flushes one click by tick first to prove the loop is live. In production this needs a shutdown within milliseconds of startup, with clicks already recorded, so it does not matter there.
+</details>

@@ -225,24 +225,17 @@ public abstract class UrlStoreContractTests
     {
         var (store, _, _) = Create();
 
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var baseUrl = "https://example.com/";
 
-        var tasks = Enumerable
-            .Range(0, 50)
-            .Select(i =>
-                Task.Run(async () =>
-                {
-                    await gate.Task;
-                    var linkEntry = new LinkEntry(baseUrl + i, null);
-                    return await store.TryAddAsync("same", linkEntry, CancellationToken.None);
-                })
-            )
-            .ToArray();
-
-        // release all
-        gate.SetResult();
-        bool[] results = await Task.WhenAll(tasks);
+        bool[] results = await Concurrently.RunAsync(
+            50,
+            async i =>
+                await store.TryAddAsync(
+                    "same",
+                    new LinkEntry(baseUrl + i, null),
+                    CancellationToken.None
+                )
+        );
 
         Assert.Equal(50, results.Length);
         Assert.Equal(1, results.Count(x => x));
