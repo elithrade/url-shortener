@@ -108,6 +108,9 @@ public class StatsEndpointTests(WebApplicationFactory<Program> factory)
     [InlineData("?start=2026-10-04&end=2026-10-03", "after end")] // start after end
     [InlineData("?start=2026-09-04&end=2026-09-03", "after end")] // start after end
     [InlineData("?start=2025-10-01&end=2026-10-02", "one year")] // one year plus one day
+    [InlineData("?start=yesterday", "yyyy-MM-dd")] // not a date
+    [InlineData("?end=2026-13-01", "yyyy-MM-dd")] // no month 13
+    [InlineData("?start=10/01/2026", "yyyy-MM-dd")] // a date, but not in the documented format
     public async Task Stats_rejects_invalid_range(string query, string expectedError)
     {
         var factory = CreateFactoryAt(Now);

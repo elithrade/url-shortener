@@ -120,7 +120,7 @@ Dates are `yyyy-MM-dd` in UTC, both ends inclusive. `end` defaults to today and 
 | Status | Meaning |
 |---|---|
 | `200 OK` | The count for the range (`0` for an unknown code). |
-| `400 Bad Request` | `start` is after `end`, or the range is longer than one year. |
+| `400 Bad Request` | A date is not `yyyy-MM-dd`, `start` is after `end`, or the range is longer than one year. |
 | `503 Service Unavailable` | The storage is unavailable. |
 
 ## Manual testing with curl
@@ -200,6 +200,8 @@ curl -s -w " -> %{http_code}\n" "$BASE/$CODE/stats?start=2026-10-05&end=2026-10-
 #   "Start must not be after end" -> 400
 curl -s -w " -> %{http_code}\n" "$BASE/$CODE/stats?start=2025-01-01&end=2026-10-01"
 #   "The range must be at most one year" -> 400
+curl -s -w " -> %{http_code}\n" "$BASE/$CODE/stats?start=yesterday"
+#   "start and end must be dates in the format yyyy-MM-dd" -> 400
 ```
 
 ### Collision test
