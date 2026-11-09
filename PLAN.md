@@ -377,6 +377,9 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Remove entries in place in the in-memory `Sweep` instead of `Where(...).ToArray()` (about 2x faster when measured; check the docs on `Dictionary.Remove` during enumeration first).
 - Assert on the sweep logs with a `FakeLogger` (check the package first and ask before adding it).
 
+**Validation (a future PR)**
+- Request validation is hand-written in each handler (`UrlValidator`, `ExpiryPolicy`, the stats range). Consider a declarative approach, like zod in TypeScript: first check .NET 10's built-in Minimal API validation (`AddValidation()`, data annotations on parameters and request types, no new package; verify what it covers), then FluentValidation (a new dependency, ask first). Validation runs after binding, so neither fixes binding leniency on its own: `DateOnly?` accepted `10/01/2026`, which is why the stats dates are parsed with `TryParseExact`.
+
 **Tidy-ups (optional)**
 - Share the repeated `now` / `clock` / `store` setup in the store tests.
 - Simplify `ExpiryPolicy` to one exit with a `lifetime` variable.
