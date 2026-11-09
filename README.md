@@ -186,6 +186,20 @@ curl -i -X POST $BASE/shorten -H "Host: evil.example" \
 curl -s -w " -> %{http_code}\n" -X POST $BASE/shorten -H "Host: evil.example" \
   -H "Content-Type: application/json" \
   -d "{\"url\":\"$BASE/abc\"}"
+
+# 11. Click stats: create a link, follow it three times, then read the count
+CODE=$(curl -s -X POST $BASE/shorten -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/stats-demo"}' | sed -E 's/.*"code":"([^"]+)".*/\1/')
+for i in 1 2 3; do curl -s -o /dev/null $BASE/$CODE; done
+curl -s $BASE/$CODE/stats   # straight away: clicks may still be 0 (not flushed yet)
+sleep 6                     # wait one flush interval (Clicks:FlushIntervalSeconds, 5 s)
+curl -s $BASE/$CODE/stats   # last 30 days: {"code":"...","start":"...","end":"<today>","clicks":3}
+TODAY=$(date -u +%F)
+curl -s "$BASE/$CODE/stats?start=$TODAY&end=$TODAY"            # today only (UTC): clicks 3
+curl -s -w " -> %{http_code}\n" "$BASE/$CODE/stats?start=2026-10-05&end=2026-10-01"
+#   "Start must not be after end" -> 400
+curl -s -w " -> %{http_code}\n" "$BASE/$CODE/stats?start=2025-01-01&end=2026-10-01"
+#   "The range must be at most one year" -> 400
 ```
 
 ### Collision test
