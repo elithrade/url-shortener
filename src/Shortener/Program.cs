@@ -58,6 +58,7 @@ app.UseWhen(
 
 app.MapPost("/shorten", HandlePost).AddEndpointFilter<RateLimitFilter>();
 app.MapGet("/{code}", HandleGet);
+app.MapGet("/{code}/stats", HandleGetStats);
 
 // liveness runs no checks: it only proves the process can answer
 app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
@@ -333,6 +334,42 @@ static async Task<IResult> HandleGet(
     }
 
     return Results.NotFound();
+}
+
+static async Task<IResult> HandleGetStats(
+    string code,
+    DateOnly? start,
+    DateOnly? end,
+    IClickStore store,
+    TimeProvider clock,
+    ILogger<Program> logger,
+    CancellationToken ct
+)
+{
+    var today = DateOnly.FromDateTime(clock.GetUtcNow().UtcDateTime);
+    end ??= today;
+    start ??= end.Value.AddDays(-29);
+
+    if (start > end)
+    {
+        return Results.BadRequest("Start must not be after end");
+    }
+
+    if (end.Value.AddYears(-1) > start)
+    {
+        return Results.BadRequest("The range must be at most one year");
+    }
+
+    try
+    {
+        var count = await store.GetAsync(code, start.Value, end.Value, ct);
+        return Results.Ok(new StatsResponse(code, start.Value, end.Value, count));
+    }
+    catch (StorageUnavailableException ex)
+    {
+        HandlerLog.StorageUnavailable(logger, ex);
+        return Results.StatusCode(503);
+    }
 }
 
 internal static partial class StartupLog
