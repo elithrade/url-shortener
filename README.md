@@ -10,6 +10,7 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It'
 - The service's public address comes from `Shortener:BaseUrl`, never from the request's `Host` header (which the client controls). It is used for the self-link check and to build `shortUrl`. It is checked at startup, and the app refuses to start without a valid one: absolute, `https` (or `http` in Development only), no path, query, fragment or user info. Development uses `http://localhost:5154` from `appsettings.Development.json`.
 - Expiry: every link expires. The client may send `expiresInSeconds` (60 to 31,536,000), and the default is 30 days. An expired link behaves exactly like an unknown one (`404`).
 - `GET /{code}` redirects to the stored URL with `302 Found`, or returns `404` if the code is unknown or expired.
+- `GET /{code}/stats` returns the click count of a link over a date range. Clicks are counted off the redirect path (a bounded channel, then batched writes), so the count lags by up to one flush interval (5 s by default) and clicks are dropped, not delayed, when the queue is full.
 - Two stores behind the `IUrlStore` interface, chosen by the `Storage` setting: `InMemory` (the default; a `Dictionary` guarded by a `Lock`) and `Postgres` (EF Core with Npgsql, where uniqueness comes from the primary key on the code and links are kept in the database). Entries are `LinkEntry(Url, ExpiresAt)`, and the expiry is checked on every read against an injected `TimeProvider`.
 - Bounded retry on code collisions: up to 5 attempts, then `503`.
 - Rate limiting on `POST /shorten`: a token bucket per client IP (IPv6 reduced to its /64), with a burst of 5 and 1 more request per second by default. Over the limit, the response is `429` with `Retry-After` in whole seconds. `GET /{code}` is not limited.
@@ -111,6 +112,17 @@ The stored URL is the canonical form (`Uri.AbsoluteUri`): the scheme and host ar
 | `404 Not Found` | Unknown or expired code. The two cases are deliberately indistinguishable. |
 | `503 Service Unavailable` | The storage is unavailable. |
 
+### `GET /{code}/stats?start=&end=`
+Dates are `yyyy-MM-dd` in UTC, both ends inclusive. `end` defaults to today and `start` to 29 days before `end`. The range is at most one year.
+```json
+{ "code": "Cy8Zv0I", "start": "2026-10-01", "end": "2026-10-04", "clicks": 5 }
+```
+| Status | Meaning |
+|---|---|
+| `200 OK` | The count for the range (`0` for an unknown code). |
+| `400 Bad Request` | A date is not `yyyy-MM-dd`, `start` is after `end`, or the range is longer than one year. |
+| `503 Service Unavailable` | The storage is unavailable. |
+
 ## Manual testing with curl
 `-i` shows the status line and headers. Leave `-L` off, so you see the 302 itself and not the destination page.
 
@@ -174,6 +186,22 @@ curl -i -X POST $BASE/shorten -H "Host: evil.example" \
 curl -s -w " -> %{http_code}\n" -X POST $BASE/shorten -H "Host: evil.example" \
   -H "Content-Type: application/json" \
   -d "{\"url\":\"$BASE/abc\"}"
+
+# 11. Click stats: create a link, follow it three times, then read the count
+CODE=$(curl -s -X POST $BASE/shorten -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/stats-demo"}' | sed -E 's/.*"code":"([^"]+)".*/\1/')
+for i in 1 2 3; do curl -s -o /dev/null $BASE/$CODE; done
+curl -s $BASE/$CODE/stats   # straight away: clicks may still be 0 (not flushed yet)
+sleep 6                     # wait one flush interval (Clicks:FlushIntervalSeconds, 5 s)
+curl -s $BASE/$CODE/stats   # last 30 days: {"code":"...","start":"...","end":"<today>","clicks":3}
+TODAY=$(date -u +%F)
+curl -s "$BASE/$CODE/stats?start=$TODAY&end=$TODAY"            # today only (UTC): clicks 3
+curl -s -w " -> %{http_code}\n" "$BASE/$CODE/stats?start=2026-10-05&end=2026-10-01"
+#   "Start must not be after end" -> 400
+curl -s -w " -> %{http_code}\n" "$BASE/$CODE/stats?start=2025-01-01&end=2026-10-01"
+#   "The range must be at most one year" -> 400
+curl -s -w " -> %{http_code}\n" "$BASE/$CODE/stats?start=yesterday"
+#   "start and end must be dates in the format yyyy-MM-dd" -> 400
 ```
 
 ### Collision test

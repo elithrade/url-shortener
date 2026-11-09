@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.HttpLogging;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -58,6 +59,7 @@ app.UseWhen(
 
 app.MapPost("/shorten", HandlePost).AddEndpointFilter<RateLimitFilter>();
 app.MapGet("/{code}", HandleGet);
+app.MapGet("/{code}/stats", HandleGetStats);
 
 // liveness runs no checks: it only proves the process can answer
 app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
@@ -333,6 +335,76 @@ static async Task<IResult> HandleGet(
     }
 
     return Results.NotFound();
+}
+
+static async Task<IResult> HandleGetStats(
+    string code,
+    string? start,
+    string? end,
+    IClickStore store,
+    TimeProvider clock,
+    ILogger<Program> logger,
+    CancellationToken ct
+)
+{
+    // parsed here, not bound as DateOnly?: binding fails with a framework message (the developer
+    // page in Development) and accepts other formats such as 10/01/2026
+    if (!TryParseDay(start, out var startDay) || !TryParseDay(end, out var endDay))
+    {
+        return Results.BadRequest("start and end must be dates in the format yyyy-MM-dd");
+    }
+
+    var today = DateOnly.FromDateTime(clock.GetUtcNow().UtcDateTime);
+    endDay ??= today;
+    startDay ??= endDay.Value.AddDays(-29);
+
+    if (startDay > endDay)
+    {
+        return Results.BadRequest("Start must not be after end");
+    }
+
+    if (endDay.Value.AddYears(-1) > startDay)
+    {
+        return Results.BadRequest("The range must be at most one year");
+    }
+
+    try
+    {
+        var count = await store.GetAsync(code, startDay.Value, endDay.Value, ct);
+        return Results.Ok(new StatsResponse(code, startDay.Value, endDay.Value, count));
+    }
+    catch (StorageUnavailableException ex)
+    {
+        HandlerLog.StorageUnavailable(logger, ex);
+        return Results.StatusCode(503);
+    }
+}
+
+// a missing or empty value is valid (it gets a default, as with ?start=); any other must be
+// exactly yyyy-MM-dd
+static bool TryParseDay(string? value, out DateOnly? day)
+{
+    day = null;
+    if (string.IsNullOrEmpty(value))
+    {
+        return true;
+    }
+
+    if (
+        !DateOnly.TryParseExact(
+            value,
+            "yyyy-MM-dd",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out var parsed
+        )
+    )
+    {
+        return false;
+    }
+
+    day = parsed;
+    return true;
 }
 
 internal static partial class StartupLog
