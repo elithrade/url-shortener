@@ -24,6 +24,7 @@ builder.Services.Configure<HostOptions>(o =>
 );
 
 bool usePostgres = RegisterStorage(builder);
+RegisterClicks(builder);
 RegisterRateLimiter(builder);
 RegisterShortenerOptions(builder);
 RegisterForwardedHeaders(builder);
@@ -106,6 +107,7 @@ static bool RegisterStorage(WebApplicationBuilder builder)
         builder.Services.AddSingleton<IExpirySweeper>(sp =>
             sp.GetRequiredService<PostgresUrlStore>()
         );
+        builder.Services.AddSingleton<IClickStore, PostgresClickStore>();
     }
     else
     {
@@ -115,11 +117,30 @@ static bool RegisterStorage(WebApplicationBuilder builder)
         builder.Services.AddSingleton<IExpirySweeper>(sp =>
             sp.GetRequiredService<InMemoryUrlStore>()
         );
+        builder.Services.AddSingleton<IClickStore, InMemoryClickStore>();
     }
 
     builder.Services.AddHostedService<ExpirySweepService>();
 
     return usePostgres;
+}
+
+static void RegisterClicks(WebApplicationBuilder builder)
+{
+    builder
+        .Services.AddOptions<ClickOptions>()
+        .BindConfiguration(ClickOptions.Section)
+        .ValidateDataAnnotations()
+        .ValidateOnStart();
+
+    // one recorder for the whole app: the redirect writes to its channel, the flush service
+    // reads from the same channel. A second instance would be a second, unread channel.
+    builder.Services.AddSingleton(sp => new ClickRecorder(
+        sp.GetRequiredService<IOptions<ClickOptions>>().Value.Capacity,
+        sp.GetRequiredService<TimeProvider>()
+    ));
+    builder.Services.AddSingleton(sp => sp.GetRequiredService<ClickRecorder>().Reader);
+    builder.Services.AddHostedService<ClickFlushService>();
 }
 
 static void RegisterRateLimiter(WebApplicationBuilder builder)
@@ -289,6 +310,7 @@ static async Task<IResult> HandlePost(
 static async Task<IResult> HandleGet(
     string code,
     IUrlStore store,
+    ClickRecorder recorder,
     ILogger<Program> logger,
     CancellationToken ct
 )
@@ -306,6 +328,7 @@ static async Task<IResult> HandleGet(
 
     if (url != null)
     {
+        recorder.Record(code);
         return Results.Redirect(url);
     }
 
