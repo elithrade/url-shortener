@@ -1349,3 +1349,20 @@ Configuration keys are plain strings. A key nothing binds to is silently ignored
 
 `AddSingleton(instance)` registers the instance under its own type, `SpyClickStore`. The flush service asks for `IClickStore` and got the real store. Name the service type: `AddSingleton<IClickStore>(spy)`. When several registrations exist for one type, the last one wins, and `WebApplicationFactory`'s `ConfigureServices` runs after the app's, so the spy replaces the real store.
 </details>
+
+## 29. Click analytics: the stats endpoint
+
+<details><summary>A test swapped in a <code>FakeTimeProvider</code> with <code>WithWebHostBuilder</code>, yet the response showed the real date and 0 clicks. Why?</summary>
+
+`WithWebHostBuilder` does not change the fixture. It starts a second app with its own singletons: its own clock and its own in-memory click store. The test created the link in the new app, seeded clicks through the fixture's `Services` and called `/stats` with the fixture's client, so the request hit the original app (real clock, no clicks in that range). Use the derived factory for every step.
+</details>
+
+<details><summary>Why cap the stats range at one calendar year (<code>start >= end.AddYears(-1)</code>) and not at 365 or 366 days?</summary>
+
+Both ends are inclusive. A leap year (2028-01-01 to 2028-12-31) is 366 days, and "this date last year to today" across Feb 29 is 367. A day count rejects one or the other; `AddYears(-1)` accepts both. The cap is defensive: with one row per (code, day) behind the key even a huge range is cheap, but it bounds public input, avoids `DateOnly.MinValue`/`MaxValue` overflow, and leaves room to store raw events later.
+</details>
+
+<details><summary>Three checks returned 400 for "after today" and "after end", and every test passed. What was wrong?</summary>
+
+The conditions did not match their messages, and `start > end` with both dates in the past (`?start=2026-09-10&end=2026-09-05`) matched none of them, fell through to the store, which throws, and returned 500. The test rows all had a `start` after today, which hid it. "Start after today" with a defaulted `end` is just `start > end`: one rule covers every case. Pick test rows that separate the conditions, not only rows that look different.
+</details>

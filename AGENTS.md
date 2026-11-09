@@ -51,7 +51,7 @@ The test project has no `Program.cs` of its own. `WebApplicationFactory<Program>
 - A test should be able to fail. For logic that matters, temporarily break the code (for example `<=` instead of `<`) and confirm that a test goes red.
 - Keep `Microsoft.EntityFrameworkCore.Design` and the `dotnet-ef` tool on the EF Core version that the Npgsql provider requires (now 10.0.4). A higher version raised the app's EF Core and broke the test project build (CS1705).
 - Never call `Environment.Exit` in code that tests also run (it killed the test host and hid every result). Return an exit code from `Program.cs` instead.
-- Use `WithWebHostBuilder(... ConfigureServices ...)` to substitute fakes such as `AlwaysCollidingStore`.
+- Use `WithWebHostBuilder(... ConfigureServices ...)` to substitute fakes such as `AlwaysCollidingStore`. It builds a separate app with its own singletons (store, clock), so seed, call and read through that same derived factory, never the class fixture.
 - Supply settings that `Program.cs` reads at startup with `UseSetting`, not `ConfigureAppConfiguration` (the latter is ignored).
 - A database store's tests go in the shared contract classes, so every store proves the same behavior. A passing suite doesn't prove coverage: mutate the code to find what isn't tested.
 
