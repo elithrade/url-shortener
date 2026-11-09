@@ -1339,3 +1339,13 @@ Usually the loop sleeps in `WhenAny`, which returns when its tasks are cancelled
 
 In .NET 10 `StartAsync` runs `ExecuteAsync` through `Task.Run` tied to the stopping token. The test started, wrote a click and stopped within microseconds; in a busy full run the token was cancelled before that work started, so `ExecuteAsync` (and its drain) never ran (probe: `ExecuteTask` was `Canceled`; alone it ran, already cancelled). The test now flushes one click by tick first to prove the loop is live. In production this needs a shutdown within milliseconds of startup, with clicks already recorded, so it does not matter there.
 </details>
+
+<details><summary>The endpoint test set <code>Clicks:MaxBatchSzie</code> to 1 and timed out after 5 s. Why no error?</summary>
+
+Configuration keys are plain strings. A key nothing binds to is silently ignored, so `MaxBatchSize` kept its default of 1000 and one click waited for the 5 s tick, exactly as long as the test waited. `ValidateOnStart` only checks the values that were bound, not keys that match nothing. When a setting seems to have no effect, check the spelling first.
+</details>
+
+<details><summary>The factory did <code>services.AddSingleton(spy)</code>, yet the flush service never wrote to the spy. Why?</summary>
+
+`AddSingleton(instance)` registers the instance under its own type, `SpyClickStore`. The flush service asks for `IClickStore` and got the real store. Name the service type: `AddSingleton<IClickStore>(spy)`. When several registrations exist for one type, the last one wins, and `WebApplicationFactory`'s `ConfigureServices` runs after the app's, so the spy replaces the real store.
+</details>
