@@ -4,7 +4,7 @@ namespace Shortener.Tests;
 
 // Records each successful AddAsync batch so a test can await the flush that happens on the
 // service's own task, instead of polling or sleeping.
-internal sealed class SpyClickStore : IClickStore
+public sealed class SpyClickStore : IClickStore
 {
     private readonly Channel<IReadOnlyCollection<DailyClicks>> _batches = Channel.CreateUnbounded<
         IReadOnlyCollection<DailyClicks>
