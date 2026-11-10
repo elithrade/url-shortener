@@ -75,10 +75,12 @@ Most tests were mutation-checked: the code was deliberately broken in a scratch 
 ## Project layout
 ```
 Shortener.slnx
-src/Shortener/            the web app: Program.cs, plus folders Api/, Expiry/, RateLimiting/ (a token bucket limiter, not wired into the app yet), Storage/ (interfaces, `StorageUnavailableException`, InMemory/ and Postgres/, which holds `SchemaMigrator` and the EF migrations) and Urls/
+src/Shortener/            the web app: Program.cs, plus folders Api/, Clicks/ (the click recorder, its channel and the flush service), Expiry/, Proxy/ (trusted proxy options for forwarded headers), RateLimiting/ (the token bucket limiter on `POST /shorten`), Storage/ (interfaces, `StorageUnavailableException`, InMemory/ and Postgres/, which holds `SchemaMigrator` and the EF migrations) and Urls/
 tests/Shortener.Tests/    unit and endpoint tests, in folders that mirror src
 .editorconfig             4-space indent (2 for project, yml and json files)
 Dockerfile, compose.yaml  image for the app, and a local stack (Postgres, migrate step, app)
+infra/                    Azure stage 1: Bicep templates and the deploy steps
+.github/workflows/        CI, the deploy, the nightly Postgres stop and a manual Postgres delete
 dotnet-tools.json         the local `dotnet-ef` tool
 PLAN.md                   roadmap and current milestone
 LESSONS.md                self-test flashcards
@@ -251,9 +253,9 @@ The detailed plan, with the current milestone and status, is in `PLAN.md`. In sh
 1. ~~URL validation~~, ~~endpoint and concurrency tests~~, ~~CI~~, ~~cryptographic codes~~ (done)
 2. Expiry: done (model, policy, read-time check, the measured store sweep, and the background service that runs it).
 3. Persistence behind `IUrlStore`: done for Postgres (the store, shared contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and Docker Compose with a data volume, checked by restarting the stack). Redis is planned later as a cache in front of it.
-4. Abuse protection: done (rate limiting on `POST /shorten`, and a configured `BaseUrl` validated at startup). Config and ops: settings through `IOptions<T>` and the health endpoints are done; structured logging and graceful shutdown are next.
-5. Deployment (the Dockerfile exists; CI image build and push, a host, and a post-deploy smoke test are left).
-6. Async click counting with `Channel<T>`, caching, multi-instance design (shared store and ID allocation), load testing and failure injection.
+4. Abuse protection: done (rate limiting on `POST /shorten`, and a configured `BaseUrl` validated at startup). Config and ops: done (settings through `IOptions<T>`, health endpoints, structured JSON logging, graceful shutdown with a deadline budget).
+5. Deployment, stage 1: done (Azure Container Apps and Postgres from Bicep, a GitHub Actions deploy with OIDC that migrates, deploys and smoke-tests `/health/ready`).
+6. System design practice: click analytics done (`Channel<T>` off the redirect path, batched writes, `GET /{code}/stats`). Next: a Redis cache, a load test, multi-instance design, failure injection and a design write-up.
 7. A UI.
 
 ## Related
