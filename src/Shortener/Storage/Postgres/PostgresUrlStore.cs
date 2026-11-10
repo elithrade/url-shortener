@@ -11,7 +11,7 @@ public sealed class PostgresUrlStore(
     private readonly IDbContextFactory<ShortenerDbContext> _factory = factory;
     private readonly TimeProvider _clock = clock;
 
-    public async ValueTask<string?> GetAsync(string code, CancellationToken ct)
+    public async ValueTask<LinkEntry?> GetAsync(string code, CancellationToken ct)
     {
         var now = _clock.GetUtcNow();
         try
@@ -23,7 +23,7 @@ public sealed class PostgresUrlStore(
                 // code is case-sensitive
                 .Where(r => r.Code == code)
                 .Where(r => r.ExpiresAt == null || r.ExpiresAt > now)
-                .Select(r => r.Url)
+                .Select(r => new LinkEntry(r.Url, r.ExpiresAt))
                 .FirstOrDefaultAsync(ct);
         }
         catch (Exception ex) when (ex.IsUnavailable())

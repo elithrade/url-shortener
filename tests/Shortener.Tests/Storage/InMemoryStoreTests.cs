@@ -27,7 +27,7 @@ public class InMemoryStoreTests
         Assert.Equal(1, results.Count(x => x));
 
         var winner = results.IndexOf(true);
-        Assert.Equal(baseUrl + winner, await store.GetAsync("same", CancellationToken.None));
+        Assert.Equal(baseUrl + winner, (await store.GetAsync("same", CancellationToken.None))?.Url);
     }
 
     [Fact]
@@ -61,7 +61,7 @@ public class InMemoryStoreTests
             for (var j = 0; j < 10; j++)
             {
                 var key = $"k{i}-{j}";
-                Assert.Equal(baseUrl + key, await store.GetAsync(key, CancellationToken.None));
+                Assert.Equal(baseUrl + key, (await store.GetAsync(key, CancellationToken.None))?.Url);
             }
         }
     }

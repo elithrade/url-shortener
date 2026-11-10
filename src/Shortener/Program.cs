@@ -317,10 +317,10 @@ static async Task<IResult> HandleGet(
     CancellationToken ct
 )
 {
-    string? url = null;
+    LinkEntry? link = null;
     try
     {
-        url = await store.GetAsync(code, ct);
+        link = await store.GetAsync(code, ct);
     }
     catch (StorageUnavailableException ex)
     {
@@ -328,10 +328,10 @@ static async Task<IResult> HandleGet(
         return Results.StatusCode(503);
     }
 
-    if (url != null)
+    if (link != null)
     {
         recorder.Record(code);
-        return Results.Redirect(url);
+        return Results.Redirect(link.Url);
     }
 
     return Results.NotFound();

@@ -4,7 +4,7 @@ internal sealed class ExceptionStore(Exception ex) : IUrlStore
 {
     public int Attempts;
 
-    public ValueTask<string?> GetAsync(string code, CancellationToken ct)
+    public ValueTask<LinkEntry?> GetAsync(string code, CancellationToken ct)
     {
         throw ex;
     }

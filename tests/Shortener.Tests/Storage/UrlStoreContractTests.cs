@@ -127,8 +127,19 @@ public abstract class UrlStoreContractTests
         clock.Advance(TimeSpan.FromMilliseconds(advanceMilliseconds));
 
         // GetAsync("abc") is not null when expectedAlive, null otherwise
-        var url = await store.GetAsync("abc", CancellationToken.None);
+        var url = (await store.GetAsync("abc", CancellationToken.None))?.Url;
         Assert.Equal(expectedAlive, url != null);
+    }
+
+    // the whole entry comes back, not just the URL: a cache in front needs ExpiresAt
+    [Fact]
+    public async Task Get_returns_the_stored_entry()
+    {
+        var (store, _, now) = Create();
+        var entry = new LinkEntry("https://example.com/entry", now.AddHours(1));
+        await store.TryAddAsync("abc", entry, CancellationToken.None);
+
+        Assert.Equal(entry, await store.GetAsync("abc", CancellationToken.None));
     }
 
     [Fact]
@@ -172,7 +183,7 @@ public abstract class UrlStoreContractTests
 
         clock.Advance(TimeSpan.FromMilliseconds(advanceMilliseconds));
 
-        var url = await store.GetAsync("abc", CancellationToken.None);
+        var url = (await store.GetAsync("abc", CancellationToken.None))?.Url;
         Assert.Equal(expectedAlive, url != null);
     }
 
@@ -189,7 +200,7 @@ public abstract class UrlStoreContractTests
 
         clock.Advance(TimeSpan.FromDays(365));
 
-        var url = await store.GetAsync("abc", CancellationToken.None);
+        var url = (await store.GetAsync("abc", CancellationToken.None))?.Url;
         Assert.NotNull(url);
     }
 
@@ -208,7 +219,7 @@ public abstract class UrlStoreContractTests
         clock.Advance(TimeSpan.FromHours(2));
 
         // get should return null
-        var url = await store.GetAsync("abc", CancellationToken.None);
+        var url = (await store.GetAsync("abc", CancellationToken.None))?.Url;
         Assert.Null(url);
 
         Assert.False(
@@ -241,7 +252,7 @@ public abstract class UrlStoreContractTests
         Assert.Equal(1, results.Count(x => x));
 
         var winner = results.IndexOf(true);
-        Assert.Equal(baseUrl + winner, await store.GetAsync("same", CancellationToken.None));
+        Assert.Equal(baseUrl + winner, (await store.GetAsync("same", CancellationToken.None))?.Url);
     }
 
     [Fact]
@@ -265,10 +276,10 @@ public abstract class UrlStoreContractTests
             )
         );
 
-        var url = await store.GetAsync("abc", CancellationToken.None);
+        var url = (await store.GetAsync("abc", CancellationToken.None))?.Url;
         Assert.Equal("https://example.com/1", url);
 
-        url = await store.GetAsync("aBc", CancellationToken.None);
+        url = (await store.GetAsync("aBc", CancellationToken.None))?.Url;
         Assert.Equal("https://example.com/2", url);
     }
 

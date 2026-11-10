@@ -34,21 +34,21 @@ public abstract class ExpirySweeperContractTests
         // getting expired should return null
         foreach (var (Code, _) in expired)
         {
-            Assert.Null(await store.GetAsync(Code, CancellationToken.None));
+            Assert.Null((await store.GetAsync(Code, CancellationToken.None))?.Url);
         }
         foreach (var (Code, _) in expiredNow)
         {
-            Assert.Null(await store.GetAsync(Code, CancellationToken.None));
+            Assert.Null((await store.GetAsync(Code, CancellationToken.None))?.Url);
         }
 
         // live and never should return url
         foreach (var (Code, Url) in live)
         {
-            Assert.Equal(Url, await store.GetAsync(Code, CancellationToken.None));
+            Assert.Equal(Url, (await store.GetAsync(Code, CancellationToken.None))?.Url);
         }
         foreach (var (Code, Url) in never)
         {
-            Assert.Equal(Url, await store.GetAsync(Code, CancellationToken.None));
+            Assert.Equal(Url, (await store.GetAsync(Code, CancellationToken.None))?.Url);
         }
     }
 
@@ -87,7 +87,7 @@ public abstract class ExpirySweeperContractTests
 
         Assert.Equal(
             "https://newexample.com/abc",
-            await store.GetAsync("abc", CancellationToken.None)
+            (await store.GetAsync("abc", CancellationToken.None))?.Url
         );
     }
 

@@ -6,7 +6,7 @@ public sealed class InMemoryUrlStore(TimeProvider timeProvider) : IUrlStore, IEx
     private readonly Lock _lock = new();
     private readonly TimeProvider _clock = timeProvider;
 
-    public ValueTask<string?> GetAsync(string code, CancellationToken ct)
+    public ValueTask<LinkEntry?> GetAsync(string code, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
 
@@ -16,14 +16,14 @@ public sealed class InMemoryUrlStore(TimeProvider timeProvider) : IUrlStore, IEx
             {
                 if (linkEntry.ExpiresAt is not null && _clock.GetUtcNow() >= linkEntry.ExpiresAt)
                 {
-                    return ValueTask.FromResult<string?>(null);
+                    return ValueTask.FromResult<LinkEntry?>(null);
                 }
 
-                return ValueTask.FromResult<string?>(linkEntry.Url);
+                return ValueTask.FromResult<LinkEntry?>(linkEntry);
             }
         }
 
-        return ValueTask.FromResult<string?>(null);
+        return ValueTask.FromResult<LinkEntry?>(null);
     }
 
     public ValueTask<int> SweepAsync(CancellationToken ct)
