@@ -259,6 +259,133 @@ Committed `68afdff`.
 - Measured with `docker compose pause postgres` and a POST in progress, then `docker compose stop app`: before, 10.56 s and exit `137` (SIGKILL, the client got a dropped connection). After: exit `0`, and the POST got `503`, on a new connection after 3.04 s and on a pooled connection hung mid-command after 9.18 s. A hung command fails after its timeout + about 6 s (5 s gave 11.17 s), source inside Npgsql not found. See `LESSONS.md` section 23
 - The Dockerfile uses the exec-form `ENTRYPOINT`, so `dotnet` is PID 1 and gets SIGTERM. `ExpirySweepService` logs `Cancel signalled, exiting...` on stop
 
+### ✅ Milestone 8: ship it (Azure stage 1)
+Deploy steps are in `infra/README.md`; the stage 1 must-dos are under "Azure plan, in stages".
+
+#### ✅ Forwarded headers
+- `ForwardedHeaders` section: off by default, `X-Forwarded-For` only, `TrustAnyProxy` or `KnownNetworks`, `ForwardLimit` 1
+- Five tests, each mutation-checked
+
+#### ✅ Bicep and the first manual deploy
+- Bicep in `infra/`, deployed by hand to `australiaeast`: the migrate job ran, both health checks return `200`, `POST /shorten` returns `201`
+- A subscription budget with email alerts
+
+#### ✅ Deploy from GitHub Actions
+- `.github/workflows/deploy.yml` runs after `ci.yml` passes on a push to `main`, in this order:
+  1. Build and push the image with `GITHUB_TOKEN`
+  2. Sign in to Azure with OIDC (a managed identity, Contributor on the resource group only, federated credential for this repo's `main`)
+  3. Start Postgres if it is stopped, or recreate it from the Bicep if it was deleted
+  4. Run the migrate job
+  5. Deploy the Bicep
+  6. Smoke-test `/health/ready`
+- First run verified end to end. A stopped Postgres made the migrate step fail and nothing was deployed, as designed
+
+#### ✅ Postgres cost
+- No free offer on this account. Cost analysis: B1MS about AU$0.037 an hour, storage about AU$6.30 a month even while stopped
+- `stop-postgres.yml` stops the server nightly and `deploy.yml` starts it before migrating: about AU$7 to 10 a month instead of about AU$33
+- `delete-postgres.yml` (run by hand) deletes the server for a long break, since storage can't shrink below 32 GB. The next deploy recreates it from the Bicep, then migrates. Verified: a delete, then a deploy that recreated it and returned ready `200`
+
+#### ✅ Follow-ups
+- The grace period (see the must-dos)
+- `SSL Mode=VerifyFull` instead of `Require`. The container trusts Azure's certificate chain, and `/health/ready` returned `200` on the new revision
+- The `org.opencontainers.image.source` label in the Dockerfile
+- A flaky startup test: `ObjectDisposedException` about one run in eight, from a race inside `WebApplicationFactory` when `ValidateOnStart` failed inside `app.Run()`. Fixed by running `IStartupValidator.Validate()` before `Run`
+
+### 🟡 Line 2, item A: click analytics
+Done except the latency measurement (item D).
+
+#### ✅ Click store
+- `IClickStore`
+  - `AddAsync(batch of DailyClicks)` adds (never sets) and sums duplicates of (code, day)
+  - `GetAsync(code, start, end)` returns a `long` total, both ends inclusive
+  - `start > end` or a count of zero or less throws, rejecting the whole batch before any write. An empty batch does nothing
+- `InMemoryClickStore`: `AddOrUpdate` per key
+- `PostgresClickStore`
+  - The `AddClickStats` migration: `click_stats` with `"Code"`, `"Day"` (date) and `"Count"` (bigint), primary key `(Code, Day)`, FK to `links` with `ON DELETE CASCADE` (a swept code can be reused)
+  - `AddAsync` is one raw-SQL upsert: `unnest` of three arrays, `JOIN links` (clicks for a vanished link are skipped), `GROUP BY`, `ON CONFLICT ... + EXCLUDED."Count"`. It is sent as a `FormattableString`, so the arrays are parameters
+  - `GetAsync` is LINQ `SumAsync`
+  - `PostgresFixture.ResetAsync` truncates both tables
+  - The transient-error helpers moved to `PostgresExceptionExtensions` for both stores
+- Tests: both stores pass the same 15 contract tests, and a Postgres-only test proves clicks for a code without a link are skipped and the rest counted
+- Mutation-checked on the in-memory store. Read-then-write lost about 60% of 100,000 concurrent adds; set-instead-of-add and an off-by-one at either end of the range each turn a test red
+- Decided: the in-memory click store is not pruned when the sweep deletes a link (Postgres cascades), so in development a reused code inherits old clicks. Accepted, since the in-memory store is for development only
+
+#### ✅ `ClickRecorder`
+- A bounded channel of `Click(Code, At)`. `Record` stamps the time with `TimeProvider`, so a click near midnight counts on its own day
+- `FullMode = Wait` with `TryWrite` only. A full channel drops the new click without delaying the redirect, and each `false` increments `Dropped` with `Interlocked`. An exact count beats `DropWrite`, whose `TryWrite` returns `true` and drops silently
+- Five unit tests: record, drop the new click when full, accept again after a read, 10,000 concurrent drops all counted, capacity below 1 throws
+- Mutation: `_dropped++` instead of `Interlocked.Increment` turned the concurrency test red 3 of 3 times
+
+#### ✅ `ClickFlushService`
+- A `BackgroundService` that reads a `ChannelReader<Click>` (not the recorder, so tests use a plain channel)
+- One loop on one thread, so a plain `Dictionary<(Code, Day), int>` needs no lock
+  1. `await Task.WhenAny(tick, read)`
+  2. Take what is queued: at most the `Count` snapshot, stopping at `MaxBatchSize` distinct entries
+  3. Flush if the `PeriodicTimer` ticked or the batch is full
+- A completed `tick` or `read` task is replaced after every wake-up. Otherwise `WhenAny` returns at once and the loop spins (an empty tick that was not re-armed pinned a CPU and hung the run)
+- A failed flush (`StorageUnavailableException`) is dropped, not retried. At-most-once, because a retry after a commit whose reply was lost would double count. Its clicks are added to `Dropped`, and one warning is logged
+- On stop the loop ends through the `while` check or, if a flush was cancelled, through `catch (OperationCanceledException) when`. A drain then takes and flushes what is left with its own 5 s budget
+- `ClickOptions` (`Clicks` section): `Capacity`, `MaxBatchSize`, `FlushIntervalSeconds`
+- Six tests with `SpyClickStore` and `FakeTimeProvider.AdvanceUntilAsync`
+- .NET 10 trap: if `StopAsync` cancels before the `Task.Run` that starts `ExecuteAsync` has run, `ExecuteAsync` never runs (probe: `ExecuteTask` was `Canceled` in the full run; the drain test passed alone and failed in every full run). So the drain test first flushes one click by tick to prove the loop is live
+- Mutations that turn a test red: `<=` at the cap, size-only flush, tick-only flush, no clear after a failure, counting entries instead of clicks, no empty check, no drain
+- Survives: removing the `Count` snapshot. A hot key under constant writes never reaches the cap, so the take never ends. Not covered
+
+#### ✅ Wiring
+- `RegisterClicks` binds `ClickOptions` with `ValidateDataAnnotations` and `ValidateOnStart` (defaults in `appsettings.json`: 10000, 1000, 5 s)
+- `ClickRecorder` is a singleton (a second instance would be a channel nobody reads), its `Reader` is registered as `ChannelReader<Click>`, and `ClickFlushService` as a hosted service
+- `RegisterStorage` adds `IClickStore` (in-memory or Postgres)
+- `HandleGet` calls `Record` only on a redirect, never on a 404 or 503
+- Two endpoint tests in `ClicksEndpointTests` with `SpyClicksFactory`: a redirect flushes one click for its code, and a miss flushes nothing (red when `Record` moved above the null check)
+
+#### ✅ Stats endpoint
+- `GET /{code}/stats?start=&end=` returns `{ code, start, end, clicks }` (`StatsResponse`), dates as UTC `DateOnly`, both ends inclusive
+- Each date defaults on its own: `end` to today (from `TimeProvider`), `start` to `end` minus 29 days (30 days inclusive). The response echoes the range, so a client sees the defaults applied
+- Rules
+  - `start > end` is a 400, which also covers a `start` after a defaulted today
+  - At most one calendar year: `start >= end.AddYears(-1)`, not a day count, because a range across Feb 29 has 366 or 367 days. The cap is defensive. Daily rows behind the `(code, day)` key keep even a huge range cheap, but the cap bounds input and leaves room for raw events later
+- The dates arrive as strings and are parsed with `TryParseExact("yyyy-MM-dd")`; an empty value counts as missing. Bound as `DateOnly?`, a bad date got a framework 400 (the developer page in Development, naming `Nullable<DateOnly>`) and `10/01/2026` was accepted as October 1
+- An unknown code returns `clicks: 0` without a link lookup. A store outage returns `503`, as for the redirect
+- Tests (`StatsEndpointTests`): the count over an explicit range, a missing code, two theories with a fake clock through `WithWebHostBuilder` (four ranges that resolve, four rejected with the rule in the message), and a `503` through `ExceptionClickStore`
+- Mutations that turn a test red: `>=` at the cap, no cap, no order check, `-30` instead of `-29`, both dates defaulted together, `start` defaulted from today, no `503` catch, lenient `TryParse` instead of `TryParseExact`
+
+### 🟡 Line 2, item B: Redis cache
+Built; the hit rate is not measured yet (item D).
+
+#### ✅ `CachedUrlStore`
+- A cache-aside decorator around the real `IUrlStore`. A read checks Redis, and a miss reads the inner store and fills Redis. `TryAddAsync` and the sweeper go straight to the store
+- On only when `ConnectionStrings:Redis` is set (`RegisterCache`). The decorator asks for the inner store by its concrete type, because asking for `IUrlStore` would resolve to itself
+- The key is `Cache:KeyPrefix` + code, and the value is the `LinkEntry` as JSON, in one `SET` with its TTL (a hash would need a second `EXPIRE`). So `IUrlStore.GetAsync` now returns `LinkEntry?`, not the URL
+- The key's TTL is the smaller of `Cache:TtlSeconds` (3600) and the link's remaining lifetime. Every hit checks `ExpiresAt` against the app's `TimeProvider` at the stores' boundary (`now >= ExpiresAt`). The app's clock decides validity; Redis's TTL only frees memory
+- "Not found" is not cached, and `POST /shorten` does not write to the cache. Links never change, so only expiry invalidates, and only clicked links take memory
+- Reads use `JsonSerializerOptions.Strict` (.NET 10), so `{}` or a missing `Url` throws. A cached `null`, bad JSON and a failed Redis call are treated as a miss and fall back to the store (the counter tags them `error`)
+- A `remaining <= 0` guard before the write was dead code (a mutation removing it survived) and is gone. `now` is read once, before the inner store, and the inner store only returns an entry whose `ExpiresAt` is after its own later clock reading, so `remaining` is always positive. Reading the clock again after the inner call would need the guard back, because Redis rejects a zero or negative TTL
+
+#### ✅ Redis down
+- `RedisConnection.Configure` sets `AbortOnConnectFail = false`, all three timeouts to `Cache:TimeoutMilliseconds` (200) and `BacklogPolicy.FailFast`
+- Measured against a refused port: with only `asyncTimeout=200`, a read waited 5 s in the client's backlog (6 s for the call); with fail-fast it failed in 28 ms
+- Catch both `RedisException` and `RedisTimeoutException` (the second derives from `TimeoutException`)
+
+#### ✅ Counter
+- `shortener.cache.reads` on the meter `Shortener.Cache`, tagged `hit`, `miss` or `error`, exactly one per `GetAsync`
+- `ReadCacheAsync` returns one result per path. An expired entry is a hit, an unusable value or failed read an error. Failed writes are not counted
+- Read it with `dotnet-counters monitor -n Shortener --counters Shortener.Cache`
+
+#### ✅ Compose and tests
+- Compose runs `redis:7` with `maxmemory 100mb`, `allkeys-lru` and no persistence
+- Tests
+  - `CachedStoreContractTests`: the whole store contract against the decorator with a real Redis
+  - `CachedUrlStoreTests`, and the decorator around the Postgres store
+  - `CacheEndpointTests`: the app with the setting (one miss then one hit), redirects with Redis down, no cache without the setting
+  - `RedisConnectionTests`: the settings directly (in a timing test, fail-fast and the short timeouts hide each other)
+- Mutations
+  - Store, 11 of 12 red: never reading Redis, no expiry check on a hit, `>` at the boundary, no TTL cap, no TTL, either Redis catch rethrown, the JSON error rethrown, default JSON options, a null entry returned, connection errors not caught
+  - Counter, 6 of 6. Registration, 5 of 5 after `CacheEndpointTests` and `RedisConnectionTests` were added
+  - Survives: dropping `RedisTimeoutException` from the catches. The tests only produce a refused connection; covering it needs a stalled Redis (item E)
+
+#### Azure option
+- Azure Cache for Redis retires on 2028-09-30. Its replacement, Azure Managed Redis, starts near US$12 a month (third-party listing, unverified) and cannot be stopped. The plan is Redis as its own container in Container Apps
+
 ## Line 1: usable and deployed (v1)
 
 **Definition of done:** the service runs at a public URL, survives a restart without losing data, rejects abusive input, has green CI that deploys on merge to `main`, and the README explains how to run, test and deploy it.
@@ -269,10 +396,10 @@ Committed `68afdff`.
 | 2 | ✅ CI | Done: GitHub Actions builds and tests on every push and PR, a red run was demonstrated, and the `build` check is required by a ruleset on `main` (admin bypass left on, so it is advisory for the owner). Optional leftovers: a README badge, a test-report step, pinning the runner image or SDK |
 | 3 | ✅ Better codes | Done: `RandomNumberGenerator.GetString` replaces `Random`, and a chi-squared uniformity test passes and fails against the biased version. Known limit: no test can detect a regression to `Random`, so consider enabling analyzer CA5394 |
 | 4 | ✅ Expiry | Done: a link can have a TTL, and expired links return 404. Model, `ExpiryPolicy`, lazy check on read, handler wiring, store and policy tests, endpoint tests with a `FakeTimeProvider` (alive at lifetime minus 1 s and 404 at exactly the lifetime, for an explicit and the default lifetime, plus a boundary theory for 59, 60, 31536000 and 31536001, which also asserts the 400 body contains `31536000`; mutation-checked with `Seconds` instead of `TotalSeconds`, 4 tests failed), the sweep measurement (see above, with the decision to keep the brute-force sweep), `IExpirySweeper.Sweep()`, `ExpirySweepService` and its tests, and a test that the store and sweeper resolve to the same instance. Optional leftovers: in-place `Sweep` and logging assertions with `FakeLogger` |
-| 5 | ✅ Persistence | A Postgres `IUrlStore` (EF Core with the Npgsql provider) replaces the in-memory one. Links survive a restart, acknowledged writes are durable, and the same contract tests run against both implementations. Uniqueness comes from a primary key on the code, and expiry from an `expires_at` column that reads check against the injected `TimeProvider`, with the existing sweeper deleting expired rows. Users and auth can later use the same database. Done: the store, the contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and a Compose stack with a data volume whose restart check kept a link (see "Already done"). The Redis lab's findings feed the Line 2 cache. Optional leftovers: see "Next up" |
+| 5 | ✅ Persistence | A Postgres `IUrlStore` (EF Core with the Npgsql provider) replaces the in-memory one. Links survive a restart, acknowledged writes are durable, and the same contract tests run against both implementations. Uniqueness comes from a primary key on the code, and expiry from an `expires_at` column that reads check against the injected `TimeProvider`, with the existing sweeper deleting expired rows. Users and auth can later use the same database. Done: the store, the contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and a Compose stack with a data volume whose restart check kept a link (see "Already done"). The Redis lab's findings feed the Line 2 cache. Optional leftovers: see "Open items", Persistence |
 | 6 | ✅ Abuse protection | Done: rate limiting on `POST /shorten`, and a configured `BaseUrl`, validated at startup, for the self-link check and `shortUrl`. Optional leftover: `AllowedHosts` set to the real host in milestone 8 |
 | 7 | ✅ Config and ops | Settings in `IOptions<T>` and env vars (done for `Shortener` and `RateLimit`; `Storage` stays a pre-build read because it decides registrations), `/health/live` and `/health/ready` (done), graceful shutdown with a deadline budget (done), structured JSON logging with one line per request (done) |
-| 8 | Ship it | Stage 1 of the Azure plan below: image built and pushed by CI, Container Apps plus managed Postgres defined in Bicep, deployed from GitHub Actions with OIDC, the `migrate` step as a Container Apps Job before each new revision (with a database role that can alter the schema for that step only), post-deploy smoke test. **Decided:** Azure Container Apps and Azure Database for PostgreSQL Flexible Server (see "Deployment shape") |
+| 8 | ✅ Ship it | Done (see "Already done"): stage 1 of the Azure plan below: image built and pushed by CI, Container Apps plus managed Postgres defined in Bicep, deployed from GitHub Actions with OIDC, the `migrate` step as a Container Apps Job before each new revision (with a database role that can alter the schema for that step only), post-deploy smoke test. **Decided:** Azure Container Apps and Azure Database for PostgreSQL Flexible Server (see "Deployment shape") |
 
 ### Schedule
 | Week | Dates | Focus |
@@ -289,7 +416,7 @@ Decided in discussion, not yet built:
 - **v1 layout (decided):** Azure, with the API on **Container Apps** and **managed Postgres** (Flexible Server). Goal: learn deploying to Azure with a path to scale, not production-grade resilience; the only user is the owner. Rejected: Postgres as a Container App (container storage is ephemeral, and Azure Files over SMB is not POSIX: no `chmod` and no hard links, which Postgres needs; NFS needs the Premium tier and a VNet) and Postgres in Docker on a VM (cheaper, but all the operations work: patching, backups, tested restores, network security).
 - **Several API instances:** N copies behind a load balancer, all on the same database. The `migrate` step runs once per deploy, not once per instance (the `EnsureCreatedAsync` race). During a rolling deploy the old version runs against the new schema for a while, so schema changes should be additive first (expand), with drops and renames in a later release (contract).
 - **Redis** (Line 2, item B) is its own service, never inside the API container: a read-through cache in front of Postgres, a cache TTL that never outlives `ExpiresAt`, eviction allowed (a lost entry costs one read), and redirects must still work when Redis is down.
-- Not covered yet: the load balancer and forwarded headers (the rate limiter's client key and the self-link check both depend on them), secrets in the host's store, and backup and restore tests.
+- Not covered yet: backup and restore tests. Forwarded headers and secrets were handled in stage 1 (see the must-dos below).
 
 ### Azure plan, in stages
 Each stage adds one layer of a typical enterprise setup (edge, gateway, private network, compute), so each can be learned on its own, and the work can stop after any stage. Infrastructure is defined in **Bicep** from stage 1, so recreating or scaling is a small diff and nothing depends on portal clicks.
@@ -352,9 +479,14 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Start each day by re-reading yesterday's diff, and end it with a committed state plus a note on what comes next.
 
 ## Next up
-1. **Milestone 8, stage 1 of the Azure plan** (see "Deployment shape"): ✅ `ForwardedHeaders` (the `ForwardedHeaders` section: off by default, `X-Forwarded-For` only, `TrustAnyProxy` or `KnownNetworks`, `ForwardLimit` 1; five tests, each mutation-checked). ✅ Bicep (`infra/`) and a first manual deploy to `australiaeast`: the migrate job ran, both health checks return `200`, and `POST /shorten` returns `201` (steps in `infra/README.md`). ✅ A subscription budget with email alerts. ✅ The GitHub Actions deploy (`.github/workflows/deploy.yml`): after `ci.yml` passes on a push to `main`, it builds and pushes the image with `GITHUB_TOKEN`, signs in to Azure with OIDC (a managed identity, Contributor on the resource group only, federated credential for this repo's `main`), runs the migrate job, deploys the Bicep and smoke-tests `/health/ready`. First run verified end to end (a stopped Postgres made the migrate step fail and nothing was deployed, as designed). **Stage 1 is done.** No free offer on this account (Cost analysis: B1MS about AU$0.037 an hour, storage about AU$6.30 a month even while stopped), so Postgres is stopped nightly by `stop-postgres.yml` and started by `deploy.yml` before migrating: about AU$7 to 10 a month instead of about AU$33. ✅ Follow-ups: the grace period (above); `SSL Mode=VerifyFull` instead of `Require` (the container trusts Azure's certificate chain: `/health/ready` returned 200 on the new revision); the `org.opencontainers.image.source` label in the Dockerfile. ✅ A flaky startup test (`ObjectDisposedException` about one run in eight, a race inside `WebApplicationFactory` when `ValidateOnStart` failed inside `app.Run()`) fixed by running `IStartupValidator.Validate()` before `Run`. ✅ `delete-postgres.yml` (by hand) deletes the server for a long break, since storage can't shrink below 32 GB; the next deploy recreates it from the Bicep first, then migrates (verified: delete, then a deploy that recreated it and returned ready 200).
-2. **Line 2, item A (click analytics), done except the latency measurement.** Decided: `IClickStore` with `AddAsync(batch of DailyClicks)` that adds (never sets) and sums duplicates of (code, day), and `GetAsync(code, start, end)` returning a `long` total with both ends inclusive. `start > end` and a count of zero or less throw, rejecting the whole batch before any write; an empty batch does nothing. Postgres: `click_stats(code, day, count)`, primary key `(code, day)`, FK to `links` with `ON DELETE CASCADE` (a swept code can be reused), and an upsert that joins `links` so clicks for a vanished link are skipped (`PostgresFixture.ResetAsync` must then truncate both tables). Done: the click store layer. `InMemoryClickStore` (`AddOrUpdate` per key) and `PostgresClickStore` pass the same 15 contract tests, mutation-checked on the in-memory store (read-then-write lost about 60% of 100,000 concurrent adds; set-instead-of-add and an off-by-one at either end of the range each turn a test red). Postgres: the `AddClickStats` migration (`click_stats` with `"Code"`, `"Day"` date, `"Count"` bigint, key `(Code, Day)`, FK to `links` with cascade); `AddAsync` is one raw-SQL upsert (`unnest` of three arrays, `JOIN links`, `GROUP BY`, `ON CONFLICT ... + EXCLUDED."Count"`, sent as a `FormattableString` so the arrays are parameters); `GetAsync` is LINQ `SumAsync`; a Postgres-only test proves clicks for a code without a link are skipped and the rest counted; the transient-error helpers moved to `PostgresExceptionExtensions` for both stores. Done: `ClickRecorder`. Decided: a bounded channel of `Click(Code, At)`, stamped in `Record` with `TimeProvider` so a click near midnight counts on its own day; `FullMode = Wait` with `TryWrite` only, so a full channel drops the new click without delaying the redirect, and each `false` increments `Dropped` with `Interlocked` (an exact count beats a silent `DropWrite`, whose `TryWrite` returns `true`). Five unit tests (record, drop the new click when full, accept again after a read, 10,000 concurrent drops all counted, capacity below 1 throws); `_dropped++` instead of `Interlocked.Increment` turned the concurrency test red 3 of 3 times. Done: `ClickFlushService`, a `BackgroundService` that reads a `ChannelReader<Click>` (not the recorder, so tests use a plain channel). One loop, one thread, so a plain `Dictionary<(Code, Day), int>` needs no lock: `await Task.WhenAny(tick, read)`, take what is queued (at most the `Count` snapshot, stopping at `MaxBatchSize` distinct entries), then flush if the `PeriodicTimer` ticked or the batch is full. A completed `tick` or `read` task is replaced after every wake-up, or `WhenAny` returns at once and the loop spins (an empty tick that was not re-armed pinned a CPU and hung the run). A failed flush (`StorageUnavailableException`) is dropped, not retried (at-most-once: a retry after a commit whose reply was lost would double count), its clicks are added to `Dropped`, and one warning is logged. On stop the loop ends through the `while` check or, if a flush was cancelled, through `catch (OperationCanceledException) when`, then a drain takes and flushes what is left with its own 5 s budget. `ClickOptions` (`Clicks` section: `Capacity`, `MaxBatchSize`, `FlushIntervalSeconds`). Six tests use `SpyClickStore` (records each batch, or each failed batch after `FailNext`) and `FakeTimeProvider.AdvanceUntilAsync`. In .NET 10, if `StopAsync` cancels before the `Task.Run` that starts `ExecuteAsync` has run, `ExecuteAsync` never runs (probe: `ExecuteTask` was `Canceled` in the full run, the drain test passed alone and failed in every full run), so the drain test first flushes one click by tick to prove the loop is live. Mutations: `<=` at the cap, size-only flush, tick-only flush, no clear after a failure, counting entries instead of clicks, no empty check and no drain each turn a test red; removing the `Count` snapshot survives (a hot key under constant writes never reaches the cap, so the take never ends; not covered). Done: wiring. `RegisterClicks` binds `ClickOptions` with `ValidateDataAnnotations` and `ValidateOnStart` (defaults in `appsettings.json`: 10000, 1000, 5 s), registers `ClickRecorder` as a singleton (one channel: a second instance would be a channel nobody reads), its `Reader` as `ChannelReader<Click>` and `ClickFlushService` as a hosted service; `RegisterStorage` adds `IClickStore` (in-memory or Postgres). `HandleGet` calls `Record` only on a redirect, never on a 404 or 503. Two endpoint tests (`ClicksEndpointTests` with `SpyClicksFactory`: the spy as `IClickStore`, `Clicks:MaxBatchSize` 1 so the first click flushes without a clock): a redirect flushes one click for its code, and a miss flushes nothing (red when `Record` moved above the null check). Done: the stats endpoint. `GET /{code}/stats?start=&end=` returns `{ code, start, end, clicks }` (`StatsResponse`), dates as UTC `DateOnly`, both ends inclusive. Each date defaults on its own: `end` to today (from `TimeProvider`), `start` to `end` minus 29 days (30 days inclusive); the range is echoed so a client sees the defaults applied. One rule for order (`start > end` is a 400, which also covers a `start` after a defaulted today) and a cap of one calendar year (`start >= end.AddYears(-1)`, not a day count: a leap year or a range across Feb 29 has 366 or 367 days). The cap is defensive: daily rows behind the `(code, day)` key keep even a huge range cheap, but it bounds input and leaves room for raw events later. The dates arrive as strings and are parsed with `TryParseExact("yyyy-MM-dd")`: bound as `DateOnly?`, a bad date got a framework 400 (the developer page in Development, naming `Nullable<DateOnly>`) and `10/01/2026` was accepted as October 1; an empty value counts as missing. An unknown code returns `clicks: 0` without a link lookup. `503` on a store outage, as for the redirect. Tests (`StatsEndpointTests`): the count over an explicit range, a missing code, two theories (four ranges that resolve, four that are rejected with the rule in the message) with a fake clock through `WithWebHostBuilder`, and a `503` through `ExceptionClickStore`. Mutations: `>=` at the cap, no cap, no order check, `-30` instead of `-29`, both dates defaulted together, `start` defaulted from today, no `503` catch and lenient `TryParse` instead of `TryParseExact` each turn a test red. Decided: the in-memory click store is not pruned when the sweep deletes a link (Postgres cascades), so in development a reused code inherits old clicks; accepted, since the in-memory store is for development only. Not yet shown: "redirect latency is unaffected" (measure with item D). For item C: Npgsql's pool defaults to 100 connections per connection string, Postgres to 100 in all and Azure B1ms to about 50, so set Max Pool Size so that replicas × pool stays under the server's limit (a test that filled the pool locked a later test out, fixed with `ClearAllPools`).
-3. **Line 2, item B (Redis cache), built; the hit rate is not measured yet.** `CachedUrlStore` is a decorator around the real `IUrlStore` (cache-aside): a read checks Redis, and a miss reads the inner store and fills Redis; `TryAddAsync` and the sweeper go straight to the store. On only when `ConnectionStrings:Redis` is set (`RegisterCache`; the decorator asks for the inner store by its concrete type, because asking for `IUrlStore` would resolve to itself). Decided: the key is `Cache:KeyPrefix` + code and the value is the `LinkEntry` as JSON (one `SET` with its TTL; a hash would need a second `EXPIRE`), so `IUrlStore.GetAsync` now returns `LinkEntry?`, not the URL. The key's TTL is the smaller of `Cache:TtlSeconds` (3600) and the link's remaining lifetime, and every hit checks `ExpiresAt` against the app's `TimeProvider` at the same boundary as the stores (`now >= ExpiresAt`): the app's clock decides validity, Redis's TTL only frees memory. "Not found" is not cached, and `POST /shorten` does not write to the cache: links never change, so only expiry invalidates, and only clicked links take memory. Reads use `JsonSerializerOptions.Strict` (.NET 10), so `{}` or a missing `Url` throws; a cached `null`, bad JSON and a failed Redis call all count as a miss and fall back to the store. Redis down: `RedisConnection.Configure` sets `AbortOnConnectFail = false`, all three timeouts to `Cache:TimeoutMilliseconds` (200) and `BacklogPolicy.FailFast`. Measured: with only `asyncTimeout=200`, a read against a refused port waited 5 s in the client's backlog (6 s for the call); with fail-fast it failed in 28 ms. Catch both `RedisException` and `RedisTimeoutException` (the second derives from `TimeoutException`). Counter: `shortener.cache.reads` on the meter `Shortener.Cache`, tagged `hit`, `miss` or `error`, exactly one per `GetAsync` (the read is `ReadCacheAsync`, which returns one result per path; an expired entry is a hit, an unusable value or failed read an error, failed writes are not counted). Read it with `dotnet-counters monitor -n Shortener --counters Shortener.Cache`. Compose runs `redis:7` with `maxmemory 100mb`, `allkeys-lru` and no persistence. Tests: the whole store contract against the decorator with a real Redis (`CachedStoreContractTests`), `CachedUrlStoreTests`, `CacheEndpointTests` (the app with the setting: one miss then one hit, redirects with Redis down, no cache without the setting), `RedisConnectionTests` (the settings directly: in a timing test fail-fast and the short timeouts hide each other) and the decorator around the Postgres store. Mutations: on the store 11 of 12 turn a test red (never reading Redis, no expiry check on a hit, `>` at the boundary, no TTL cap, no TTL, either Redis catch rethrown, the JSON error rethrown, default JSON options, a null entry returned, connection errors not caught); on the counter 6 of 6; on the registration 5 of 5 after the two test classes above. One survives: dropping `RedisTimeoutException` from the catches (the tests only produce a refused connection; needs a stalled Redis, item E). A thirteenth mutation, removing a `remaining <= 0` guard before the write, also survived and showed the guard was dead code: `now` is read once, before the inner store, and the inner store only returns an entry whose `ExpiresAt` is after its own later clock reading, so `remaining` is always positive. The guard was removed; reading the clock again after the inner call would need it back, because Redis rejects a zero or negative TTL. Left: measure the hit rate under load (item D). For Azure: Azure Cache for Redis retires on 2028-09-30 and its replacement, Azure Managed Redis, starts near US$12 a month (third-party listing, unverified) and cannot be stopped; the plan is Redis as its own container in Container Apps.
+Milestone 8 is done, and items A and B are built (see "Already done").
+
+1. **Line 2, item D (load test).** k6 or bombardier against the redirect path, to measure
+   - redirect latency with click recording on (the last check for item A)
+   - the cache hit rate under load (the last check for item B)
+2. **Line 2, item C (multi-instance).** Set Npgsql's Max Pool Size so that replicas × pool stays under the server's limit. The pool defaults to 100 connections per connection string; Postgres allows 100 in all and Azure B1ms about 50. (A test that filled the pool locked a later test out; fixed with `ClearAllPools`.)
+3. **Line 2, item E (failure injection).** Include a stalled Redis, so a test covers the `RedisTimeoutException` catch that survives mutation today.
+4. **Redis in Azure**, as its own Container App (see "Azure option" under item B).
 
 ## Open items (not scheduled)
 **Rate limiting**
@@ -363,11 +495,9 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - An upper bound on `TokenBucketOptions.Period` (a huge period could overflow the tick cast, see `LESSONS.md` section 20).
 - Check whether malformed bodies bypass the limit (endpoint filters run after model binding).
 - Limit 404s per client on `GET` against code enumeration.
-- Behind a proxy: `ForwardedHeaders` with trusted proxies (milestone 8).
 
 **Persistence**
 - Decide what a normal start does when the schema is missing: fail fast (for example via `GetPendingMigrationsAsync`) or keep the `500` on the first request. Readiness does not catch it: `CanConnectAsync` only proves the server accepts a connection.
-- In milestone 8, check the host's grace period: the budget needs it above the app's `ShutdownTimeout` (12 s). Kubernetes defaults to 30 s.
 - Build the shared test fixture's database with `SchemaMigrator` instead of `EnsureCreatedAsync`, so tests use the production schema path.
 - The `57P01` test from the storage-outage entry.
 - A `CancellationToken` for `SchemaMigrator`.
