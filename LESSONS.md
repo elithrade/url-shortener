@@ -1366,3 +1366,30 @@ Both ends are inclusive. A leap year (2028-01-01 to 2028-12-31) is 366 days, and
 
 The conditions did not match their messages, and `start > end` with both dates in the past (`?start=2026-09-10&end=2026-09-05`) matched none of them, fell through to the store, which throws, and returned 500. The test rows all had a `start` after today, which hid it. "Start after today" with a defaulted `end` is just `start > end`: one rule covers every case. Pick test rows that separate the conditions, not only rows that look different.
 </details>
+
+## 30. Redis cache: the decorator pattern
+
+<details><summary>What is a decorator, and how does <code>CachedUrlStore</code> use it?</summary>
+
+A class that implements the same interface as the thing it wraps, adds behavior and delegates the rest. `CachedUrlStore : IUrlStore` holds an inner `IUrlStore`: `GetAsync` checks Redis first and asks the inner store on a miss (cache-aside), `TryAddAsync` passes straight through. The endpoint cannot tell whether it holds a plain store or a cached one. Redis itself is not an `IUrlStore`: it may evict, restart empty or be down, and the decorator covers each case by asking the inner store.
+</details>
+
+<details><summary>Why a decorator and not the cache logic inline in the endpoint (get from Redis, else from the database, then set)?</summary>
+
+The flow is the same; the place differs. Inline, the handler always needs Redis (so does every endpoint test), a Redis failure becomes a 500 unless the handler also catches it, and the logic can only be tested through HTTP. As a decorator the cache is switched on by one registration (no connection string, no cache), the handler does not change, and the class runs the whole store contract plus its own unit tests with a fake clock.
+</details>
+
+<details><summary>Two registrations exist for <code>IUrlStore</code> (the real store, then the cached one). Which does the endpoint get, and how does the decorator get its inner store?</summary>
+
+The last registration wins, so the endpoint gets `CachedUrlStore`. The decorator must not ask DI for an `IUrlStore`: that would resolve to itself (a circular dependency). It asks for the concrete type: `ActivatorUtilities.CreateInstance<CachedUrlStore>(sp, sp.GetRequiredService<PostgresUrlStore>())` passes the inner store by hand and lets DI fill the rest. The sweeper is registered against the concrete store too, so it bypasses the cache.
+</details>
+
+<details><summary>Why do the store contract tests also run against <code>CachedUrlStore</code>?</summary>
+
+A decorator is swapped in transparently, so it must keep every promise the plain store makes. `CachedStoreContractTests` inherits the contract and wraps an in-memory store with a real Redis: if caching changes any answer, such as returning a link after its `ExpiresAt`, a contract test goes red. The inner store's kind does not matter to the cache, so the in-memory one keeps the tests fast.
+</details>
+
+<details><summary>Building the decorator showed that <code>GetAsync</code> returned only the URL. Why was that a problem?</summary>
+
+On a miss the decorator gets its data from the inner store through the interface. With only a URL it could not cache `ExpiresAt`, so it could not keep the cache TTL within the link's lifetime or check expiry on a hit. `GetAsync` now returns `LinkEntry?`. A decorator can only work with what the interface exposes, so wrapping a store is a good test of whether the interface says enough.
+</details>
