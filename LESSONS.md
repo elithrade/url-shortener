@@ -1108,7 +1108,7 @@ Writes grow the table, use up the code space and are how spam and phishing links
 
 <details><summary>A chain of guard clauses (<code>if (bad) return Fail(...)</code>) keeps getting the next condition wrong. What technique helps?</summary>
 
-After each guard, write down what is now **known** to be true, because every later line only runs if the earlier checks passed. The next condition only has to handle what's left. Example for `BaseUrl`: after "has text", "parses as absolute" and "scheme is http or https", the dev rule only has to think about http: `parsedUrl.Scheme == "http" && !env.IsDevelopment()`. A first attempt, `!IsDevelopment() || Scheme != "http"`, failed https everywhere. Order matters: put the dev rule before the scheme check and it has to cover `ftp` too. A truth table of the four scheme × environment cases catches a flipped `!` or `==`.
+After each guard, write down what is now **known** to be true, because every later line only runs if the earlier checks passed. The next condition only has to handle what's left. Example for `BaseUrl`: after "has text", "parses as absolute" and "scheme is http or https", the dev rule only has to think about http: `parsedUrl.Scheme == "http" && !env.IsDevelopment()`. A first attempt, `!IsDevelopment() || Scheme != "http"`, failed https everywhere. If the dev rule came before the scheme check, it would have to cover `ftp` too. A truth table of the four scheme × environment cases catches a flipped `!` or `==`.
 </details>
 
 <details><summary>Removing a check leaves the whole suite green. What are the two possible reasons, and how do you tell them apart?</summary>
@@ -1203,7 +1203,7 @@ The package is public (a new GHCR package starts private and has to be switched 
 
 <details><summary>CI will "run the migration". Why does it start a Container Apps Job instead of running <code>migrate</code> on the GitHub runner?</summary>
 
-The runner sits outside Azure. Running `migrate` there would mean opening the Postgres firewall to GitHub's large, changing address ranges and copying the connection string into GitHub as well. The job runs inside the Container Apps environment, which the firewall already admits, with the secret it already has, so CI only needs the right to start it. Order matters: run the job before the app moves to a new image, so the new code never meets an old schema.
+The runner sits outside Azure. Running `migrate` there would mean opening the Postgres firewall to GitHub's large, changing address ranges and copying the connection string into GitHub as well. The job runs inside the Container Apps environment, which the firewall already admits, with the secret it already has, so CI only needs the right to start it. Run the job before the app moves to a new image, so the new code never meets an old schema.
 </details>
 
 <details><summary>A Bicep parameter is <code>@secure()</code> and read with <code>readEnvironmentVariable</code>. What do those two guard against, and what do they not?</summary>

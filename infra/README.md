@@ -1,6 +1,6 @@
 # Deploying to Azure (stage 1)
 
-How to deploy the app to Azure Container Apps by hand, with the Bicep in this folder. Stage 1 of the Azure plan in `PLAN.md`. Later, GitHub Actions runs the same steps.
+How to deploy the app to Azure Container Apps by hand with the Bicep in this folder (stage 1 of the Azure plan in `PLAN.md`). GitHub Actions runs the same steps on every push to `main`; see [Continuous deployment](#continuous-deployment).
 
 What `main.bicep` creates in one resource group:
 
@@ -35,7 +35,9 @@ az provider register -n Microsoft.DBforPostgreSQL --wait
 az provider register -n Microsoft.OperationalInsights --wait
 ```
 
-A budget with email alerts (it only alerts, it never stops spending), easiest in the portal: Cost Management → Budgets → Add, scoped to the subscription. Cost data lags by up to a day. To check whether the account still has the 12-month free services (B1ms Postgres is one of them): portal → Free services, or after a day, Cost analysis shows whether Postgres compute is charged.
+Add a budget with email alerts in the portal: Cost Management → Budgets → Add, scoped to the subscription. A budget only sends alerts; it never stops spending. Cost data lags by up to a day.
+
+To check whether the account still has the 12-month free services (B1ms Postgres is one of them), open portal → Free services. Or wait a day and check in Cost analysis whether Postgres compute is charged.
 
 Check that the region offers what the template uses (B1ms and Postgres 17):
 
@@ -123,8 +125,7 @@ az identity federated-credential create -g rg-shortener --identity-name id-short
 
 Repository secrets (secrets, not variables: the repo's Actions logs are public and only secrets are masked): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `SHORTENER_ALLOWED_IP`, `POSTGRES_ADMIN_PASSWORD`. Pipe values in (`... | gh secret set NAME`) to keep them out of shell history. The GHCR package needs the repo under Package settings → Manage Actions access (role Write), or the `org.opencontainers.image.source` label from the Dockerfile on a first push.
 
-Before pushing:
-- If your public IP changed, update `SHORTENER_ALLOWED_IP` first, or the deploy locks you out.
+If your public IP has changed, update the `SHORTENER_ALLOWED_IP` secret before pushing, or the deploy locks you out.
 
 A failed run can be repeated without redoing the jobs that passed: `gh run rerun <run id> --failed`.
 
@@ -144,19 +145,24 @@ Job logs: portal → the job → Execution history → Console logs, or `az cont
 
 ## Keeping the cost down
 
-Measured in `australiaeast` (no free offer on this account): B1MS compute about AU$0.037 an hour (about AU$27 a month if it never stops), 32 GB of storage about AU$6.30 a month whether running or not, Log Analytics within its free 5 GB.
+Measured in `australiaeast`, on an account with no free offer:
+- B1MS compute: about AU$0.037 an hour (about AU$27 a month if it never stops)
+- 32 GB of storage: about AU$6.30 a month, running or stopped
+- Log Analytics: within its free 5 GB
 
-`.github/workflows/stop-postgres.yml` stops the server every night (14:00 UTC), and `deploy.yml` starts it before migrating, so a push never fails on a stopped database. Start it by hand to use the app between deploys.
-
-Storage can't shrink below 32 GB, so the only way to stop paying for it is to delete the server. For a long break, run `.github/workflows/delete-postgres.yml` by hand (type `delete` to confirm). It removes every stored link. The next deploy finds no server, runs the template first to recreate it with the same name and password, then migrates as usual, about 5 to 10 minutes longer than a normal deploy. Delete only the server, never the resource group: the deploy identity lives in it.
-
-GitHub disables scheduled workflows in a public repo after 60 days without activity; re-enable it from the Actions tab.
-
+`.github/workflows/stop-postgres.yml` stops the server every night (14:00 UTC), and `deploy.yml` starts it before migrating, so a push never fails on a stopped database. To use the app between deploys, start the server by hand:
 
 ```bash
-az postgres flexible-server stop  -g rg-shortener -n <server name>   # stopped servers pay only for storage
-az postgres flexible-server start -g rg-shortener -n <server name>   # Azure restarts a stopped server after 7 days
-az group delete -n rg-shortener                                      # removes everything
+az postgres flexible-server start -g rg-shortener -n <server name>
+az postgres flexible-server stop  -g rg-shortener -n <server name>   # pays only for storage; Azure restarts it after 7 days
 ```
 
-The app scales to zero by itself when idle. The server name is in the deployment outputs (`postgresHost`, before the first dot).
+The server name is in the deployment outputs (`postgresHost`, before the first dot).
+
+Storage can't shrink below 32 GB, so the only way to stop paying for it is to delete the server. For a long break, run `.github/workflows/delete-postgres.yml` by hand (type `delete` to confirm). It removes every stored link. The next deploy finds no server, runs the template first to recreate it with the same name and password, then migrates as usual. That deploy takes about 5 to 10 minutes longer than a normal one. Delete only the server, never the resource group: the deploy identity lives in it.
+
+GitHub disables scheduled workflows in a public repo after 60 days without activity. Re-enable the nightly stop from the Actions tab.
+
+The app scales to zero by itself when idle.
+
+To remove everything, including the deploy identity: `az group delete -n rg-shortener`.

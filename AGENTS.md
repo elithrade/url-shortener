@@ -8,14 +8,49 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It 
 ## Layout
 ```
 Shortener.slnx
-src/Shortener/            web app: Program.cs and folders Api/ (request and response records, ShortenerOptions and its validator), Expiry/, RateLimiting/ (IRateLimiter, RateLimitResult, RateLimitOptions, TokenBucketOptions, TokenBucket, TokenBucketLimiter, RateLimitKey, RateLimitFilter on `POST /shorten`), Storage/ (IUrlStore, IExpirySweeper, LinkEntry, IClickStore with DailyClicks, InMemory/, Postgres/ with LinkRecord, ClickStatRecord, ShortenerDbContext, PostgresUrlStore, PostgresClickStore, PostgresExceptionExtensions (transient errors to StorageUnavailableException), PostgresHealthCheck, SchemaMigrator, DesignTimeDbContextFactory and Migrations/), Proxy/ (TrustedProxyOptions and its validator, which configure `UseForwardedHeaders`), Urls/ (UrlValidator, CodeGenerator), Clicks/ (Click, ClickRecorder: a bounded channel that `Record` writes to without waiting, counting rejected clicks in `Dropped`; ClickOptions; ClickFlushService: the consumer that sums by (code, day) and flushes on a tick or at `MaxBatchSize`, drops failed batches into `Dropped` and drains on stop), Caching/ (CacheOptions; RedisConnection: the connection settings that keep a Redis outage cheap; CachedUrlStore: a cache-aside decorator around the real IUrlStore, registered only when `ConnectionStrings:Redis` is set, counting reads as hit, miss or error). All code stays in the single namespace `Shortener`
-tests/Shortener.Tests/    unit tests and endpoint tests (xUnit, WebApplicationFactory), in folders that mirror src. Namespace `Shortener.Tests`. Store behavior lives in abstract contract classes (`UrlStoreContractTests`, `ExpirySweeperContractTests`, `ClickStoreContractTests`) with an in-memory and a Postgres subclass each. The Postgres ones need Docker running (Testcontainers, one shared container via `[Collection("postgres")]`), and so do the Redis ones (`[Collection("redis")]`, `RedisFixture`): they never flush Redis, each store or app gets its own key prefix from `RedisFixture.UniquePrefix()`. A multiplexer on `localhost:1` (built with `RedisConnection.Configure`) stands in for a Redis that is down. `CountingUrlStore` counts reads of the inner store, and `TestMeters.CreateFactory()` with a `MetricCollector` reads a counter for one store. `ShortenClientExtensions.PostShortenAsync` posts to `/shorten`, optionally with a forged `Host`, a `peer` (the address connected to the app, set through `RemoteIpStartupFilter`) and an `X-Forwarded-For` header. `Concurrently.RunAsync` (or `RunSyncAsync` for synchronous work) starts N tasks behind one gate and releases them together; lambdas over a `ValueTask` must be `async i => await ...`. `FakeTimeProvider.AdvanceUntilAsync` advances step by step until a service acts, because in .NET 10 a `BackgroundService` starts through `Task.Run` and a first `Advance` can come before its timer exists. `SpyClickStore` records each flushed batch for `NextBatchAsync`/`TryNextBatchAsync`, and failed ones after `FailNext`. `SpyClicksFactory` runs the app with a `SpyClickStore` as `IClickStore` and `Clicks:MaxBatchSize` 1, so every click flushes at once. Log assertions use `FakeLogger` (`AddFakeLogging`, `GetFakeLogCollector`)
+src/Shortener/            the web app (Program.cs and the folders below)
+tests/Shortener.Tests/    unit and endpoint tests (xUnit, WebApplicationFactory), in folders that mirror src
 Dockerfile, compose.yaml  image for the app and a local stack (Postgres, Redis as a cache, a one-shot migrate step, the app)
 infra/                    Azure stage 1: main.bicep, main.bicepparam (reads secrets and personal values from environment variables) and README.md with the deploy steps
-loadtest/                 k6 load test of `GET /{code}` (redirect.js, settings through `-e`), run-app.sh (the app on the host: Release, Production, rate limit raised, `REDIS=off` for no cache) and compose.ports.yaml (publishes Postgres and Redis; always used with `-p shortener-load`, so the dev volume is untouched). Steps in `README.md`, "Load tests"
+loadtest/                 k6 load test of `GET /{code}`; steps in README.md, "Load tests"
 dotnet-tools.json         local tool manifest (dotnet-ef)
 ```
-The test project has no `Program.cs` of its own. `WebApplicationFactory<Program>` reaches the app through the project reference.
+
+### `src/Shortener/`
+All code stays in the single namespace `Shortener`.
+- `Api/`: request and response records, `ShortenerOptions` and its validator.
+- `Expiry/`.
+- `RateLimiting/`: `IRateLimiter`, `RateLimitResult`, `RateLimitOptions`, `TokenBucketOptions`, `TokenBucket`, `TokenBucketLimiter`, `RateLimitKey`, and `RateLimitFilter` on `POST /shorten`.
+- `Storage/`: `IUrlStore`, `IExpirySweeper`, `LinkEntry`, `IClickStore` with `DailyClicks`, and `InMemory/`.
+- `Storage/Postgres/`: `LinkRecord`, `ClickStatRecord`, `ShortenerDbContext`, `PostgresUrlStore`, `PostgresClickStore`, `PostgresExceptionExtensions` (turns transient errors into `StorageUnavailableException`), `PostgresHealthCheck`, `SchemaMigrator`, `DesignTimeDbContextFactory` and `Migrations/`.
+- `Proxy/`: `TrustedProxyOptions` and its validator, which configure `UseForwardedHeaders`.
+- `Urls/`: `UrlValidator`, `CodeGenerator`.
+- `Clicks/`:
+  - `Click`.
+  - `ClickRecorder`: a bounded channel. `Record` writes to it without waiting and counts rejected clicks in `Dropped`.
+  - `ClickOptions`.
+  - `ClickFlushService`: the consumer. It sums clicks by (code, day), flushes on a tick or at `MaxBatchSize`, adds failed batches to `Dropped`, and drains on stop.
+- `Caching/`:
+  - `CacheOptions`.
+  - `RedisConnection`: the connection settings that keep a Redis outage cheap.
+  - `CachedUrlStore`: a cache-aside decorator around the real `IUrlStore`, registered only when `ConnectionStrings:Redis` is set. It counts reads as hit, miss or error.
+
+### `tests/Shortener.Tests/`
+Namespace `Shortener.Tests`. The test project has no `Program.cs` of its own. `WebApplicationFactory<Program>` reaches the app through the project reference.
+- Store behavior lives in abstract contract classes (`UrlStoreContractTests`, `ExpirySweeperContractTests`, `ClickStoreContractTests`), each with an in-memory and a Postgres subclass.
+- The Postgres tests need Docker running (Testcontainers, one shared container via `[Collection("postgres")]`).
+- The Redis tests need Docker too (`[Collection("redis")]`, `RedisFixture`). They never flush Redis; each store or app gets its own key prefix from `RedisFixture.UniquePrefix()`. A multiplexer on `localhost:1` (built with `RedisConnection.Configure`) stands in for a Redis that is down.
+- `CountingUrlStore` counts reads of the inner store. `TestMeters.CreateFactory()` with a `MetricCollector` reads a counter for one store.
+- `ShortenClientExtensions.PostShortenAsync` posts to `/shorten`, optionally with a forged `Host`, a `peer` (the address connected to the app, set through `RemoteIpStartupFilter`) and an `X-Forwarded-For` header.
+- `Concurrently.RunAsync` (or `RunSyncAsync` for synchronous work) starts N tasks behind one gate and releases them together. Lambdas over a `ValueTask` must be `async i => await ...`.
+- `FakeTimeProvider.AdvanceUntilAsync` advances step by step until a service acts. In .NET 10 a `BackgroundService` starts through `Task.Run`, so a first `Advance` can come before its timer exists.
+- `SpyClickStore` records each flushed batch for `NextBatchAsync`/`TryNextBatchAsync`, and failed ones after `FailNext`. `SpyClicksFactory` runs the app with a `SpyClickStore` as `IClickStore` and `Clicks:MaxBatchSize` 1, so every click flushes at once.
+- Log assertions use `FakeLogger` (`AddFakeLogging`, `GetFakeLogCollector`).
+
+### `loadtest/`
+- `redirect.js`: the k6 script; settings through `-e`.
+- `run-app.sh`: runs the app on the host (Release, Production, rate limit raised; `REDIS=off` for no cache).
+- `compose.ports.yaml`: publishes Postgres and Redis. Always use it with `-p shortener-load`, so the dev volume is untouched.
 
 ## Commands
 - Build and test everything: `dotnet test` (run from the repo root).

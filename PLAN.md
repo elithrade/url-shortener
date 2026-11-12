@@ -54,7 +54,9 @@ Legend: ✅ done, 🟡 in progress, ⬜ to do.
 - **Tests:** store boundary (alive 1 ms before, gone exactly at expiry), a never-expiring link, the expired-code re-add, `ExpiryPolicy` unit tests
   - Mutation-checked: `>=` vs `>`, a removed check, evict-on-read, policy boundaries
 - **Endpoint tests** with a fake clock, registered as `AddSingleton<TimeProvider>` (`AddSingleton(clock)` registers only the `FakeTimeProvider` type)
-  - Mutation-checked: `<` to `<=` and `>=` to `>` (5 tests failed), a 29-day default, `now + lifetime - 1s`
+  - Alive at lifetime minus 1 s and `404` at exactly the lifetime, for an explicit and the default lifetime
+  - A boundary theory for 59, 60, 31536000 and 31536001 that also asserts the `400` body contains `31536000`
+  - Mutation-checked: `<` to `<=` and `>=` to `>` (5 tests failed), a 29-day default, `now + lifetime - 1s`, `Seconds` instead of `TotalSeconds` (4 tests failed)
 
 #### ✅ Sweep, store half
 - `IExpirySweeper` is a separate interface. It was first meant for the in-memory store only (assuming a database has native TTL); Postgres has none, so it implements it too. A store with native TTL (Redis) would not
@@ -392,14 +394,14 @@ Built; the hit rate is not measured yet (item D).
 
 | # | Milestone | Done when |
 |---|---|---|
-| 1 | ✅ Finish the test suite | Done: retry-path tests, store concurrency tests and the endpoint concurrency test (200 concurrent POSTs, each code resolving to its own URL) all pass, and each was mutation-checked |
-| 2 | ✅ CI | Done: GitHub Actions builds and tests on every push and PR, a red run was demonstrated, and the `build` check is required by a ruleset on `main` (admin bypass left on, so it is advisory for the owner). Optional leftovers: a README badge, a test-report step, pinning the runner image or SDK |
-| 3 | ✅ Better codes | Done: `RandomNumberGenerator.GetString` replaces `Random`, and a chi-squared uniformity test passes and fails against the biased version. Known limit: no test can detect a regression to `Random`, so consider enabling analyzer CA5394 |
-| 4 | ✅ Expiry | Done: a link can have a TTL, and expired links return 404. Model, `ExpiryPolicy`, lazy check on read, handler wiring, store and policy tests, endpoint tests with a `FakeTimeProvider` (alive at lifetime minus 1 s and 404 at exactly the lifetime, for an explicit and the default lifetime, plus a boundary theory for 59, 60, 31536000 and 31536001, which also asserts the 400 body contains `31536000`; mutation-checked with `Seconds` instead of `TotalSeconds`, 4 tests failed), the sweep measurement (see above, with the decision to keep the brute-force sweep), `IExpirySweeper.Sweep()`, `ExpirySweepService` and its tests, and a test that the store and sweeper resolve to the same instance. Optional leftovers: in-place `Sweep` and logging assertions with `FakeLogger` |
-| 5 | ✅ Persistence | A Postgres `IUrlStore` (EF Core with the Npgsql provider) replaces the in-memory one. Links survive a restart, acknowledged writes are durable, and the same contract tests run against both implementations. Uniqueness comes from a primary key on the code, and expiry from an `expires_at` column that reads check against the injected `TimeProvider`, with the existing sweeper deleting expired rows. Users and auth can later use the same database. Done: the store, the contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and a Compose stack with a data volume whose restart check kept a link (see "Already done"). The Redis lab's findings feed the Line 2 cache. Optional leftovers: see "Open items", Persistence |
-| 6 | ✅ Abuse protection | Done: rate limiting on `POST /shorten`, and a configured `BaseUrl`, validated at startup, for the self-link check and `shortUrl`. Optional leftover: `AllowedHosts` set to the real host in milestone 8 |
-| 7 | ✅ Config and ops | Settings in `IOptions<T>` and env vars (done for `Shortener` and `RateLimit`; `Storage` stays a pre-build read because it decides registrations), `/health/live` and `/health/ready` (done), graceful shutdown with a deadline budget (done), structured JSON logging with one line per request (done) |
-| 8 | ✅ Ship it | Done (see "Already done"): stage 1 of the Azure plan below: image built and pushed by CI, Container Apps plus managed Postgres defined in Bicep, deployed from GitHub Actions with OIDC, the `migrate` step as a Container Apps Job before each new revision (with a database role that can alter the schema for that step only), post-deploy smoke test. **Decided:** Azure Container Apps and Azure Database for PostgreSQL Flexible Server (see "Deployment shape") |
+| 1 | ✅ Finish the test suite | Done: retry path, store concurrency and endpoint concurrency, each mutation-checked (see "Already done") |
+| 2 | ✅ CI | Done: build and test on every push and PR, a red run demonstrated, `build` required on `main`. Optional leftovers: a test-report step, pinning the runner image or SDK |
+| 3 | ✅ Better codes | Done: `RandomNumberGenerator.GetString` replaces `Random`, with a chi-squared uniformity test. No test can detect a regression to `Random`, so consider enabling analyzer CA5394 |
+| 4 | ✅ Expiry | Done: links have a TTL and expired links return 404; the read-time check, the measured sweep and `ExpirySweepService` (see "Already done"). Optional leftover: remove entries in place in `Sweep` |
+| 5 | ✅ Persistence | Done: a Postgres `IUrlStore` (EF Core, Npgsql) behind the same contract tests as the in-memory store, `503` on an outage, EF migrations with a one-shot `migrate` step, and a Compose stack whose restart check kept a link. Optional leftovers: see "Open items", Persistence |
+| 6 | ✅ Abuse protection | Done: rate limiting on `POST /shorten`, and a `BaseUrl` validated at startup for the self-link check and `shortUrl`. Optional leftover: set `AllowedHosts` to the real host |
+| 7 | ✅ Config and ops | Done: settings through `IOptions<T>` (`Storage` stays a pre-build read because it decides registrations), health endpoints, graceful shutdown with a deadline budget, JSON logging with one line per request |
+| 8 | ✅ Ship it | Done: stage 1 of the Azure plan below (Container Apps and Flexible Server from Bicep, deployed from GitHub Actions with OIDC, `migrate` as a Container Apps Job before each new revision, a post-deploy smoke test) |
 
 ### Schedule
 | Week | Dates | Focus |
@@ -411,8 +413,12 @@ Built; the hit rate is not measured yet (item D).
 | 4 | Nov 9 to 13 | Milestone 8: deploy, smoke test, README. **v1 live** |
 
 ## Deployment shape (notes for milestone 8 and Line 2)
-Decided in discussion, not yet built:
-- **The API and the database are never one container.** Separate containers, one main process each. Reasons: (1) scaling: with a database inside each API container, instances would hold different links and could issue the same code twice, because uniqueness comes from one shared primary key (Line 2, item C); (2) the API is stateless and replaceable, while the database needs a volume, backups and careful upgrades, so redeploying one must not restart the other; (3) different resources and failure modes; (4) health checks, logs and limits stay meaningful per container.
+Decided before milestone 8. Stage 1 and the Redis cache are built; several API instances are not:
+- **The API and the database are never one container.** Each runs in its own container with one main process, because:
+  1. With a database inside each API container, instances would hold different links and could issue the same code twice. Uniqueness comes from one shared primary key (Line 2, item C).
+  2. The API is stateless and replaceable, while the database needs a volume, backups and careful upgrades. Redeploying one must not restart the other.
+  3. They use different resources and fail in different ways.
+  4. Health checks, logs and limits stay meaningful per container.
 - **v1 layout (decided):** Azure, with the API on **Container Apps** and **managed Postgres** (Flexible Server). Goal: learn deploying to Azure with a path to scale, not production-grade resilience; the only user is the owner. Rejected: Postgres as a Container App (container storage is ephemeral, and Azure Files over SMB is not POSIX: no `chmod` and no hard links, which Postgres needs; NFS needs the Premium tier and a VNet) and Postgres in Docker on a VM (cheaper, but all the operations work: patching, backups, tested restores, network security).
 - **Several API instances:** N copies behind a load balancer, all on the same database. The `migrate` step runs once per deploy, not once per instance (the `EnsureCreatedAsync` race). During a rolling deploy the old version runs against the new schema for a while, so schema changes should be additive first (expand), with drops and renames in a later release (contract).
 - **Redis** (Line 2, item B) is its own service, never inside the API container: a read-through cache in front of Postgres, a cache TTL that never outlives `ExpiresAt`, eviction allowed (a lost entry costs one read), and redirects must still work when Redis is down.
@@ -481,7 +487,7 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 ## Next up
 Milestone 8 is done, and items A and B are built (see "Already done").
 
-1. **Line 2, item D (load test).** k6 or bombardier against the redirect path, to measure
+1. **Line 2, item D (load test).** The k6 script is built (`loadtest/`, steps in `README.md`). Still to measure:
    - redirect latency with click recording on (the last check for item A)
    - the cache hit rate under load (the last check for item B)
 2. **Line 2, item C (multi-instance).** Set Npgsql's Max Pool Size so that replicas × pool stays under the server's limit. The pool defaults to 100 connections per connection string; Postgres allows 100 in all and Azure B1ms about 50. (A test that filled the pool locked a later test out; fixed with `ClearAllPools`.)
@@ -506,7 +512,7 @@ Milestone 8 is done, and items A and B are built (see "Already done").
 **Expiry (optional, from milestone 4)**
 - An integration test with the real store, the sweeper service and a fake clock (hosted services also run inside `WebApplicationFactory`).
 - Remove entries in place in the in-memory `Sweep` instead of `Where(...).ToArray()` (about 2x faster when measured; check the docs on `Dictionary.Remove` during enumeration first).
-- Assert on the sweep logs with a `FakeLogger` (check the package first and ask before adding it).
+- Assert on the sweep logs with a `FakeLogger` (the package is already in the test project for the logging tests).
 
 **Validation (a future PR)**
 - Request validation is hand-written in each handler (`UrlValidator`, `ExpiryPolicy`, the stats range). Consider a declarative approach, like zod in TypeScript: first check .NET 10's built-in Minimal API validation (`AddValidation()`, data annotations on parameters and request types, no new package; verify what it covers), then FluentValidation (a new dependency, ask first). Validation runs after binding, so neither fixes binding leniency on its own: `DateOnly?` accepted `10/01/2026`, which is why the stats dates are parsed with `TryParseExact`.
