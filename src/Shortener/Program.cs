@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using Shortener;
+using StackExchange.Redis;
 
 const int MaxAttempts = 5;
 const int CodeLength = 7;
@@ -25,6 +26,7 @@ builder.Services.Configure<HostOptions>(o =>
 );
 
 bool usePostgres = RegisterStorage(builder);
+RegisterCache(builder, usePostgres);
 RegisterClicks(builder);
 RegisterRateLimiter(builder);
 RegisterShortenerOptions(builder);
@@ -125,6 +127,39 @@ static bool RegisterStorage(WebApplicationBuilder builder)
     builder.Services.AddHostedService<ExpirySweepService>();
 
     return usePostgres;
+}
+
+// off unless ConnectionStrings:Redis is set; then IUrlStore becomes a CachedUrlStore around the
+// store above (the sweeper still talks to that store directly)
+static void RegisterCache(WebApplicationBuilder builder, bool usePostgres)
+{
+    var connectionString = builder.Configuration.GetConnectionString("Redis");
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        return;
+    }
+
+    builder
+        .Services.AddOptions<CacheOptions>()
+        .BindConfiguration(CacheOptions.Section)
+        .ValidateDataAnnotations()
+        .ValidateOnStart();
+
+    builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+    {
+        var cache = sp.GetRequiredService<IOptions<CacheOptions>>().Value;
+        return ConnectionMultiplexer.Connect(RedisConnection.Configure(connectionString, cache));
+    });
+
+    // registered after RegisterStorage's IUrlStore, so this one wins
+    builder.Services.AddSingleton<IUrlStore>(sp =>
+        ActivatorUtilities.CreateInstance<CachedUrlStore>(
+            sp,
+            usePostgres
+                ? sp.GetRequiredService<PostgresUrlStore>()
+                : sp.GetRequiredService<InMemoryUrlStore>()
+        )
+    );
 }
 
 static void RegisterClicks(WebApplicationBuilder builder)

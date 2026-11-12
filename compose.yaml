@@ -1,4 +1,4 @@
-# Local run: Postgres, a one-shot schema step, then the app.
+# Local run: Postgres, Redis (a cache), a one-shot schema step, then the app.
 # Needs POSTGRES_PASSWORD in the environment or in an untracked .env file.
 services:
   postgres:
@@ -10,6 +10,17 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d shortener"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # a cache, not a store: capped memory, least recently used keys evicted when full, and no
+  # persistence (a restart only costs misses)
+  redis:
+    image: redis:7
+    command: ["redis-server", "--maxmemory", "100mb", "--maxmemory-policy", "allkeys-lru", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -38,9 +49,12 @@ services:
       Shortener__BaseUrl: http://localhost:8080
       # containers log one JSON object per line, even in Development
       Logging__Console__FormatterName: json
+      ConnectionStrings__Redis: redis:6379
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
 volumes:
   pgdata:
