@@ -1436,3 +1436,10 @@ Point `ConnectionStrings:Redis` at a port where nothing listens (`localhost:1`).
 No: the guard was dead code. `GetAsync` reads `now` once, then calls the inner store, which checks expiry against its own, later clock reading. Any entry it returns has `ExpiresAt` after that later reading, so `ExpiresAt - now` is always positive. The guard would only matter if the clock were read again after the inner call: then a link in its last instant could give zero or less, and Redis rejects such a TTL. A surviving mutation means either a missing test or unreachable code, so check which before writing a test.
 </details>
 
+## 32. Load testing: percentiles
+
+<details><summary>What does p99 latency mean, and why track it instead of the average?</summary>
+
+p99 is the response time that 99% of requests beat: sort all requests by duration, and 1 in 100 is slower. The average hides the tail. In the first k6 run the average (1.97 ms) was almost three times p50 (0.69 ms), because a few slow requests (up to 190 ms) pulled it up, and it described no actual request. The tail matters because of fan-out: a user or page that makes n requests gets all of them under p99 with probability 0.99ⁿ, so with 100 requests about 63% (1 − 0.99¹⁰⁰) hit at least one slower one. Under rising load p99 usually jumps before p50 moves, because queues form first for the unlucky requests: a flat p50 with a climbing p99 means the system is near its limit.
+</details>
+
