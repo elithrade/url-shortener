@@ -21,6 +21,7 @@ public class CachedStoreContractTests(RedisFixture redis) : UrlStoreContractTest
                     KeyPrefix = RedisFixture.UniquePrefix(),
                 }
             ),
-            NullLogger<CachedUrlStore>.Instance
+            NullLogger<CachedUrlStore>.Instance,
+            TestMeters.CreateFactory()
         );
 }

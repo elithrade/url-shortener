@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
@@ -11,47 +12,75 @@ public sealed partial class CachedUrlStore(
     IConnectionMultiplexer redis,
     TimeProvider clock,
     IOptions<CacheOptions> options,
-    ILogger<CachedUrlStore> logger
+    ILogger<CachedUrlStore> logger,
+    IMeterFactory meterFactory
 ) : IUrlStore
 {
+    public const string MeterName = "Shortener.Cache";
+    public const string ReadsCounterName = "shortener.cache.reads";
+
     private readonly IDatabase _redis = redis.GetDatabase();
 
-    public async ValueTask<LinkEntry?> GetAsync(string code, CancellationToken ct)
+    // one counter, split by the "result" tag (hit, miss or error); the hit rate is
+    // hit / (hit + miss)
+    private readonly Counter<long> _reads = meterFactory
+        .Create(MeterName)
+        .CreateCounter<long>(ReadsCounterName, description: "Cache reads by result");
+
+    private async Task<(string Result, LinkEntry? Entry)> ReadCacheAsync(string code)
     {
-        RedisValue cached = default;
+        RedisValue cached;
         try
         {
             cached = await _redis.StringGetAsync(Key(code));
         }
-        // RedisTimeoutException derives from TimeoutException, not RedisException
         catch (Exception ex) when (ex is RedisException or RedisTimeoutException)
         {
             CachedUrlStoreLog.RedisUnreachableWarning(logger, ex, "read");
+            return ("error", null);
         }
 
+        if (!cached.HasValue)
+        {
+            return ("miss", null);
+        }
+
+        // deserialize: null entry or JsonException -> Error, otherwise -> Hit with the entry
         try
         {
-            if (cached.HasValue)
+            var cachedEntry = JsonSerializer.Deserialize<LinkEntry>(
+                cached.ToString(),
+                JsonSerializerOptions.Strict
+            );
+            if (cachedEntry is not null)
             {
-                var cachedEntry = JsonSerializer.Deserialize<LinkEntry>(
-                    cached.ToString(),
-                    JsonSerializerOptions.Strict
-                );
-                if (cachedEntry is not null)
-                {
-                    if (clock.GetUtcNow() >= cachedEntry.ExpiresAt)
-                    {
-                        // expired
-                        return null;
-                    }
-
-                    return cachedEntry;
-                }
+                return ("hit", cachedEntry);
             }
+
+            // the cached text was "null"
+            return ("error", null);
         }
         catch (JsonException ex)
         {
             CachedUrlStoreLog.DeserializeWarning(logger, ex);
+            return ("error", null);
+        }
+    }
+
+    public async ValueTask<LinkEntry?> GetAsync(string code, CancellationToken ct)
+    {
+        var (result, cachedEntry) = await ReadCacheAsync(code);
+        Count(result);
+
+        if (result == "hit")
+        {
+            if (clock.GetUtcNow() >= cachedEntry!.ExpiresAt)
+            {
+                // expired
+                return null;
+            }
+
+            return cachedEntry;
         }
 
         var now = clock.GetUtcNow();
@@ -85,6 +114,9 @@ public sealed partial class CachedUrlStore(
 
     public ValueTask<bool> TryAddAsync(string code, LinkEntry linkEntry, CancellationToken ct) =>
         inner.TryAddAsync(code, linkEntry, ct);
+
+    private void Count(string result) =>
+        _reads.Add(1, new KeyValuePair<string, object?>("result", result));
 
     private static TimeSpan Min(TimeSpan one, TimeSpan two)
     {

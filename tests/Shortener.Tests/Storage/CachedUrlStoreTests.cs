@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Microsoft.Extensions.Diagnostics.Metrics.Testing;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -168,7 +169,69 @@ public class CachedUrlStoreTests(RedisFixture redis)
         Assert.Equal(entry, result);
     }
 
+    // Each GetAsync counts exactly one read: hit, miss or error.
+    [Fact]
+    public async Task Reads_are_counted_by_result()
+    {
+        var (cachedStore, innerStore, _, prefix) = Create();
+        var entry = new LinkEntry("https://example.com/a", Now.AddMinutes(10));
+        await innerStore.TryAddAsync("abc", entry, CancellationToken.None);
+
+        await cachedStore.GetAsync("abc", CancellationToken.None); // miss
+        await cachedStore.GetAsync("abc", CancellationToken.None); // hit
+
+        Assert.Equal(1, Reads("miss"));
+        Assert.Equal(1, Reads("hit"));
+
+        await cachedStore.GetAsync("nope", CancellationToken.None); // miss
+
+        Assert.Equal(2, Reads("miss"));
+        Assert.Equal(0, Reads("error"));
+
+        await redis.Redis.GetDatabase().StringSetAsync(prefix + "abc", "{}");
+        await cachedStore.GetAsync("abc", CancellationToken.None); // error
+
+        Assert.Equal(1, Reads("error"));
+        Assert.Equal(2, Reads("miss"));
+        Assert.Equal(1, Reads("hit"));
+
+        await redis.Redis.GetDatabase().StringSetAsync(prefix + "abc", "null");
+        await cachedStore.GetAsync("abc", CancellationToken.None); // error
+
+        Assert.Equal(2, Reads("error"));
+        Assert.Equal(2, Reads("miss"));
+        Assert.Equal(1, Reads("hit"));
+    }
+
+    [Fact]
+    public async Task A_failed_redis_read_counts_as_an_error()
+    {
+        await using var multiplexer = await ConnectionMultiplexer.ConnectAsync(
+            RedisConnection.Configure("localhost:1", new CacheOptions { TimeoutMilliseconds = 200 })
+        );
+        var (errorCachedStore, errorInnerStore, _, _) = Create(multiplexer);
+
+        var entry = new LinkEntry("https://example.com/a", Now.AddMinutes(10));
+        await errorInnerStore.TryAddAsync("abc", entry, CancellationToken.None);
+
+        await errorCachedStore.GetAsync("abc", CancellationToken.None); // error
+
+        Assert.Equal(1, Reads("error"));
+        Assert.Equal(0, Reads("miss"));
+        Assert.Equal(0, Reads("hit"));
+    }
+
     private static readonly DateTimeOffset Now = new(2026, 1, 1, 22, 0, 0, TimeSpan.Zero);
+
+    // set by Create(); xUnit makes a new instance of this class for each test
+    private MetricCollector<long>? _reads;
+
+    // how many reads the store created by Create() has counted with this result tag
+    private long Reads(string result) =>
+        (_reads ?? throw new InvalidOperationException("Call Create() first."))
+            .GetMeasurementSnapshot()
+            .Where(m => (string?)m.Tags["result"] == result)
+            .Sum(m => m.Value);
 
     // a cached store around an in-memory store, with its own key prefix; pass a multiplexer to
     // replace the shared container's (for the Redis-down test). Inner counts its reads (Gets).
@@ -182,6 +245,12 @@ public class CachedUrlStoreTests(RedisFixture redis)
         var clock = new FakeTimeProvider(Now);
         var inner = new CountingUrlStore(new InMemoryUrlStore(clock));
         var prefix = RedisFixture.UniquePrefix();
+        var meters = TestMeters.CreateFactory();
+        _reads = new MetricCollector<long>(
+            meters,
+            CachedUrlStore.MeterName,
+            CachedUrlStore.ReadsCounterName
+        );
 
         var store = new CachedUrlStore(
             inner,
@@ -195,7 +264,8 @@ public class CachedUrlStoreTests(RedisFixture redis)
                     KeyPrefix = prefix,
                 }
             ),
-            NullLogger<CachedUrlStore>.Instance
+            NullLogger<CachedUrlStore>.Instance,
+            meters
         );
 
         return (store, inner, clock, prefix);
