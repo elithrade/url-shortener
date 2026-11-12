@@ -69,6 +69,42 @@ public class PostgresRegistrationTests(
         Assert.Equal("https://example.com/path", getResponse.Headers.Location?.OriginalString);
     }
 
+    // The production combination. Redis points at a port where nothing listens, so no Redis
+    // container is needed: the redirect goes through the decorator, the cache read fails, and
+    // Postgres answers.
+    [Fact]
+    public async Task With_a_cache_the_decorator_wraps_the_postgres_store()
+    {
+        await using var db = await fixture.CreateEmptyDatabaseAsync();
+        Assert.Equal(0, await SchemaMigrator.ExecuteAsync(db.Factory, NullLogger.Instance));
+
+        await using var factory = CreateFactory(db.ConnectionString)
+            .WithWebHostBuilder(b => b.UseSetting("ConnectionStrings:Redis", "localhost:1"));
+
+        Assert.IsType<CachedUrlStore>(factory.Services.GetRequiredService<IUrlStore>());
+        // the sweeper bypasses the cache
+        Assert.IsType<PostgresUrlStore>(factory.Services.GetRequiredService<IExpirySweeper>());
+
+        var client = factory.CreateClient(
+            new WebApplicationFactoryClientOptions { AllowAutoRedirect = false }
+        );
+        var response = await client.PostAsJsonAsync(
+            "/shorten",
+            new { url = "https://example.com/cached-postgres" }
+        );
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<ShortenResponse>();
+        Assert.NotNull(body);
+
+        var getResponse = await client.GetAsync($"/{body.Code}");
+
+        Assert.Equal(HttpStatusCode.Found, getResponse.StatusCode);
+        Assert.Equal(
+            "https://example.com/cached-postgres",
+            getResponse.Headers.Location?.OriginalString
+        );
+    }
+
     private WebApplicationFactory<Program> CreateFactory(string connectionString)
     {
         var factory = baseFactory.WithWebHostBuilder(b =>
