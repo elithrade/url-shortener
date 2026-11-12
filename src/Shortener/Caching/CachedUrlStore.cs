@@ -72,9 +72,11 @@ public sealed partial class CachedUrlStore(
         var (result, cachedEntry) = await ReadCacheAsync(code);
         Count(result);
 
-        if (result == "hit")
+        var now = clock.GetUtcNow();
+
+        if (result == "hit" && cachedEntry is not null)
         {
-            if (clock.GetUtcNow() >= cachedEntry!.ExpiresAt)
+            if (now >= cachedEntry.ExpiresAt)
             {
                 // expired
                 return null;
@@ -83,7 +85,6 @@ public sealed partial class CachedUrlStore(
             return cachedEntry;
         }
 
-        var now = clock.GetUtcNow();
         LinkEntry? entry = await inner.GetAsync(code, ct);
         if (entry is not null)
         {
@@ -92,10 +93,6 @@ public sealed partial class CachedUrlStore(
             if (expireAt is not null)
             {
                 var remaining = expireAt - now;
-                if (remaining <= TimeSpan.Zero)
-                {
-                    return entry;
-                }
                 ttl = Min(ttl, remaining.Value);
             }
 
