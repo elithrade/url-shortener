@@ -1366,3 +1366,73 @@ Both ends are inclusive. A leap year (2028-01-01 to 2028-12-31) is 366 days, and
 
 The conditions did not match their messages, and `start > end` with both dates in the past (`?start=2026-09-10&end=2026-09-05`) matched none of them, fell through to the store, which throws, and returned 500. The test rows all had a `start` after today, which hid it. "Start after today" with a defaulted `end` is just `start > end`: one rule covers every case. Pick test rows that separate the conditions, not only rows that look different.
 </details>
+
+## 30. Redis cache: the decorator pattern
+
+<details><summary>What is a decorator, and how does <code>CachedUrlStore</code> use it?</summary>
+
+A class that implements the same interface as the thing it wraps, adds behavior and delegates the rest. `CachedUrlStore : IUrlStore` holds an inner `IUrlStore`: `GetAsync` checks Redis first and asks the inner store on a miss (cache-aside), `TryAddAsync` passes straight through. The endpoint cannot tell whether it holds a plain store or a cached one. Redis itself is not an `IUrlStore`: it may evict, restart empty or be down, and the decorator covers each case by asking the inner store.
+</details>
+
+<details><summary>Why a decorator and not the cache logic inline in the endpoint (get from Redis, else from the database, then set)?</summary>
+
+The flow is the same; the place differs. Inline, the handler always needs Redis (so does every endpoint test), a Redis failure becomes a 500 unless the handler also catches it, and the logic can only be tested through HTTP. As a decorator the cache is switched on by one registration (no connection string, no cache), the handler does not change, and the class runs the whole store contract plus its own unit tests with a fake clock.
+</details>
+
+<details><summary>Two registrations exist for <code>IUrlStore</code> (the real store, then the cached one). Which does the endpoint get, and how does the decorator get its inner store?</summary>
+
+The last registration wins, so the endpoint gets `CachedUrlStore`. The decorator must not ask DI for an `IUrlStore`: that would resolve to itself (a circular dependency). It asks for the concrete type: `ActivatorUtilities.CreateInstance<CachedUrlStore>(sp, sp.GetRequiredService<PostgresUrlStore>())` passes the inner store by hand and lets DI fill the rest. The sweeper is registered against the concrete store too, so it bypasses the cache.
+</details>
+
+<details><summary>Why do the store contract tests also run against <code>CachedUrlStore</code>?</summary>
+
+A decorator is swapped in transparently, so it must keep every promise the plain store makes. `CachedStoreContractTests` inherits the contract and wraps an in-memory store with a real Redis: if caching changes any answer, such as returning a link after its `ExpiresAt`, a contract test goes red. The inner store's kind does not matter to the cache, so the in-memory one keeps the tests fast.
+</details>
+
+<details><summary>Building the decorator showed that <code>GetAsync</code> returned only the URL. Why was that a problem?</summary>
+
+On a miss the decorator gets its data from the inner store through the interface. With only a URL it could not cache `ExpiresAt`, so it could not keep the cache TTL within the link's lifetime or check expiry on a hit. `GetAsync` now returns `LinkEntry?`. A decorator can only work with what the interface exposes, so wrapping a store is a good test of whether the interface says enough.
+</details>
+
+## 31. Redis cache: clocks, failures and counters
+
+<details><summary>A test advanced the <code>FakeTimeProvider</code> 20 minutes past a link's expiry, yet Redis still held the key. Why, and what does the store do about it?</summary>
+
+The fake clock only moves code that asks it. Redis runs on its own real clock, and for Redis a few milliseconds had passed of a 10-minute TTL. So the app's clock decides validity: every hit compares `ExpiresAt` with `TimeProvider` (`now >= ExpiresAt`, the same boundary as the stores), and Redis's TTL only frees memory. In production the same gap exists in milliseconds between two servers.
+</details>
+
+<details><summary>Redis was unreachable and <code>asyncTimeout</code> was 200 ms, yet one read took 6 s. Why?</summary>
+
+While disconnected, StackExchange.Redis queues commands in a backlog and waits for a connection, and that wait used the 5 s default, not `asyncTimeout` (the error said "timed out in the backlog ... (5000ms)"). `BacklogPolicy.FailFast` fails a command at once when there is no connection: the same read failed in 28 ms. For a cache a failed command is only a miss. A stopwatch assertion with a generous limit (under 2 s) found it.
+</details>
+
+<details><summary>Which exceptions must a cache catch around a Redis call, and what is the trap?</summary>
+
+`RedisException` (connection and server errors) and `RedisTimeoutException`. The trap: `RedisTimeoutException` derives from `TimeoutException`, not from `RedisException`, so catching only `RedisException` lets a slow Redis through. One filter covers both: `catch (Exception ex) when (ex is RedisException or RedisTimeoutException)`. The read and the write each need it: a failed write must not throw away an entry the store already returned.
+</details>
+
+<details><summary>The cached value was <code>{}</code>. Why did the redirect return 500, and what fixed it?</summary>
+
+By default `JsonSerializer.Deserialize<LinkEntry>("{}")` succeeds: missing constructor parameters get their defaults, so the result is an entry with a null `Url`, which the handler then passed to `Results.Redirect`. `JsonSerializerOptions.Strict` (.NET 10) rejects missing required parameters, nulls for non-nullable properties and unknown properties with a `JsonException`, which the existing catch turns into a miss. A cached `null` deserializes to null without throwing, so that needs its own check.
+</details>
+
+<details><summary>Counting hit, miss and error in five places counted some reads twice. What structure made "exactly one per call" hold?</summary>
+
+A failed read counted an error, then fell through to code that counted a miss; a flag fixed one path and the null-entry path broke the same way. The fix: move the cache read into a method that returns one result (`ReadCacheAsync` returns hit, miss or error), and count that result in one place. A method returns once, so no path can produce two counts, and later steps never ask what earlier ones did.
+</details>
+
+<details><summary>Removing fail-fast, or removing the short timeouts, each left every Redis-down test green. Why, and how are they tested?</summary>
+
+They hide each other in a timing test: with fail-fast a command fails at once, so the timeouts never matter; without it the 200 ms timeouts keep the wait under the test's limit. Only removing both showed (6 s). Settings like these are tested directly: `RedisConnectionTests` asserts the values `RedisConnection.Configure` returns.
+</details>
+
+<details><summary>How can a test check the app with Postgres and the cache without a Redis container?</summary>
+
+Point `ConnectionStrings:Redis` at a port where nothing listens (`localhost:1`). The redirect goes through `CachedUrlStore`, the cache read fails, and Postgres answers: that proves the decorator wraps the Postgres store. An always-in-memory decorator fails the test, because no in-memory store is registered in Postgres mode.
+</details>
+
+<details><summary>Removing the <code>remaining &lt;= 0</code> guard before the cache write left every test green. Was a test missing?</summary>
+
+No: the guard was dead code. `GetAsync` reads `now` once, then calls the inner store, which checks expiry against its own, later clock reading. Any entry it returns has `ExpiresAt` after that later reading, so `ExpiresAt - now` is always positive. The guard would only matter if the clock were read again after the inner call: then a link in its last instant could give zero or less, and Redis rejects such a TTL. A surviving mutation means either a missing test or unreachable code, so check which before writing a test.
+</details>
+

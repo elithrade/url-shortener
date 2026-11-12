@@ -12,6 +12,7 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It'
 - `GET /{code}` redirects to the stored URL with `302 Found`, or returns `404` if the code is unknown or expired.
 - `GET /{code}/stats` returns the click count of a link over a date range. Clicks are counted off the redirect path (a bounded channel, then batched writes), so the count lags by up to one flush interval (5 s by default) and clicks are dropped, not delayed, when the queue is full.
 - Two stores behind the `IUrlStore` interface, chosen by the `Storage` setting: `InMemory` (the default; a `Dictionary` guarded by a `Lock`) and `Postgres` (EF Core with Npgsql, where uniqueness comes from the primary key on the code and links are kept in the database). Entries are `LinkEntry(Url, ExpiresAt)`, and the expiry is checked on every read against an injected `TimeProvider`.
+- An optional Redis cache in front of the store (`CachedUrlStore`), on only when `ConnectionStrings:Redis` is set. A redirect checks Redis first and fills it on a miss; a cached link lives for the smaller of `Cache:TtlSeconds` (1 hour) and its remaining lifetime, and its expiry is still checked on every hit. Redirects keep working when Redis is down or slow (`Cache:TimeoutMilliseconds`, 200 ms): a failed cache call counts as a miss. Reads are counted as hit, miss or error (`dotnet-counters monitor -n Shortener --counters Shortener.Cache`).
 - Bounded retry on code collisions: up to 5 attempts, then `503`.
 - Rate limiting on `POST /shorten`: a token bucket per client IP (IPv6 reduced to its /64), with a burst of 5 and 1 more request per second by default. Over the limit, the response is `429` with `Retry-After` in whole seconds. `GET /{code}` is not limited.
 - A storage outage returns `503` (not retried, and with no details in the response). Other unexpected errors stay `500`.
@@ -40,7 +41,7 @@ Storage=Postgres ConnectionStrings__Shortener="Host=localhost;Username=postgres;
 `migrate` applies the EF Core migrations (`src/Shortener/Storage/Postgres/Migrations`) and exits without starting the web server. It exits `0` on success and `1` on failure (an unreachable database, or `Storage` not set to `Postgres`), and running it again is harmless. It does not create the database itself. Only one process should run it, which is why it is a separate step and not part of app startup (two `CREATE TABLE`s at once can race; measured in `PLAN.md`). The container above has no volume, so its data is lost when it stops.
 
 ### With Docker Compose
-`compose.yaml` runs Postgres (with a `pgdata` volume), the one-shot `migrate` service, and the app, in that order. Set `POSTGRES_PASSWORD` first (in the shell, or in an untracked `.env` file next to `compose.yaml`; any value without `;` or `=` works locally):
+`compose.yaml` runs Postgres (with a `pgdata` volume), Redis as a cache (100 MB, `allkeys-lru`, no persistence), the one-shot `migrate` service, and the app, in that order. Set `POSTGRES_PASSWORD` first (in the shell, or in an untracked `.env` file next to `compose.yaml`; any value without `;` or `=` works locally):
 ```bash
 echo POSTGRES_PASSWORD=dev-only-pw-123 > .env
 docker compose up -d --wait
@@ -63,6 +64,7 @@ dotnet test
 - `InMemoryStoreTests`: concurrency against the real in-memory store (same key gives exactly one winner, and many distinct keys are all stored).
 - `UrlStoreContractTests` and `ExpirySweeperContractTests`: abstract classes that hold the shared store behavior (atomic add, expiry on read, alive 1 ms before and gone exactly at expiry, a past `ExpiresAt` is rejected, case-sensitive codes, and the sweep). Each has an in-memory and a Postgres subclass, so both stores prove the same behavior. Time is controlled with `FakeTimeProvider`, so nothing sleeps.
 - The Postgres tests use Testcontainers, so **Docker must be running**, and one container is shared by all of them. Besides the contract subclasses: `PostgresRegistrationTests` (both interfaces resolve to one store, the hosted sweeper is registered, and a round trip works on a database that the test migrated first, since the app does not create the schema), `PostgresMigrationTests` (`SchemaMigrator` on an empty database creates the table and records `InitialCreate` in the migration history, running it twice keeps the data, and an unreachable database returns `1` without throwing), `PostgresUnavailableTests` (an unreachable database becomes `StorageUnavailableException`, with no container needed) and `PostgresMisconfiguredTests` (a database that does not exist is not an outage, so it is not translated).
+- The Redis tests also use Testcontainers (one shared `redis:7` container, a key prefix per test): the store contract run against the cache decorator, `CachedUrlStoreTests` (a miss fills the cache, a hit skips the store, the key's TTL, expiry on a hit by the app's clock, unusable cached values, Redis down, and the read counter) and `CacheEndpointTests` (the app with the cache switched on).
 - `ExpirySweepServiceTests`: the background service with a fake sweeper and a `FakeTimeProvider`: it sweeps once per interval and not before, keeps running after a sweep throws, and stops cleanly (nothing sweeps after stop).
 - `ShortenEndpointTests`: the real pipeline in memory with `WebApplicationFactory`: the round trip, error responses, canonical `Location` headers, the retry limit and `503` path using a fake store (`CollidingStore`), 200 concurrent POSTs, expiry through the endpoint with a fake clock, and a storage outage (`503`, not retried, nothing leaked) versus other store exceptions (`500`).
 - `RateLimitEndpointTests`: rate limiting through the real pipeline, with a small limit (`StrictRateLimitFactory`) and a test-only `IStartupFilter` that sets the client address from an `X-Test-Client-Ip` header (`TestServer` leaves it `null`): requests over the limit get `429` with `Retry-After: 3600`, one client over the limit doesn't limit another, clients without an address share one limit, and redirects are not limited. `ShortenEndpointTests` uses a generous limit (`GenerousRateLimitFactory`).
@@ -75,7 +77,7 @@ Most tests were mutation-checked: the code was deliberately broken in a scratch 
 ## Project layout
 ```
 Shortener.slnx
-src/Shortener/            the web app: Program.cs, plus folders Api/, Clicks/ (the click recorder, its channel and the flush service), Expiry/, Proxy/ (trusted proxy options for forwarded headers), RateLimiting/ (the token bucket limiter on `POST /shorten`), Storage/ (interfaces, `StorageUnavailableException`, InMemory/ and Postgres/, which holds `SchemaMigrator` and the EF migrations) and Urls/
+src/Shortener/            the web app: Program.cs, plus folders Api/, Caching/ (the Redis cache decorator and its connection settings), Clicks/ (the click recorder, its channel and the flush service), Expiry/, Proxy/ (trusted proxy options for forwarded headers), RateLimiting/ (the token bucket limiter on `POST /shorten`), Storage/ (interfaces, `StorageUnavailableException`, InMemory/ and Postgres/, which holds `SchemaMigrator` and the EF migrations) and Urls/
 tests/Shortener.Tests/    unit and endpoint tests, in folders that mirror src
 .editorconfig             4-space indent (2 for project, yml and json files)
 Dockerfile, compose.yaml  image for the app, and a local stack (Postgres, migrate step, app)
@@ -252,10 +254,10 @@ Set `CodeLength` back to `7` afterwards.
 The detailed plan, with the current milestone and status, is in `PLAN.md`. In short:
 1. ~~URL validation~~, ~~endpoint and concurrency tests~~, ~~CI~~, ~~cryptographic codes~~ (done)
 2. Expiry: done (model, policy, read-time check, the measured store sweep, and the background service that runs it).
-3. Persistence behind `IUrlStore`: done for Postgres (the store, shared contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and Docker Compose with a data volume, checked by restarting the stack). Redis is planned later as a cache in front of it.
+3. Persistence behind `IUrlStore`: done for Postgres (the store, shared contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and Docker Compose with a data volume, checked by restarting the stack). A Redis cache sits in front of it (item 6).
 4. Abuse protection: done (rate limiting on `POST /shorten`, and a configured `BaseUrl` validated at startup). Config and ops: done (settings through `IOptions<T>`, health endpoints, structured JSON logging, graceful shutdown with a deadline budget).
 5. Deployment, stage 1: done (Azure Container Apps and Postgres from Bicep, a GitHub Actions deploy with OIDC that migrates, deploys and smoke-tests `/health/ready`).
-6. System design practice: click analytics done (`Channel<T>` off the redirect path, batched writes, `GET /{code}/stats`). Next: a Redis cache, a load test, multi-instance design, failure injection and a design write-up.
+6. System design practice: click analytics done (`Channel<T>` off the redirect path, batched writes, `GET /{code}/stats`). A Redis read cache is built (cache-aside, safe when Redis is down); its hit rate is not measured yet. Next: a load test, multi-instance design, failure injection and a design write-up.
 7. A UI.
 
 ## Related

@@ -7,17 +7,17 @@ internal sealed class CollidingStore(int failedAttempts) : IUrlStore
     private readonly Dictionary<string, LinkEntry> _items = [];
     private readonly Lock _lock = new();
 
-    public ValueTask<string?> GetAsync(string code, CancellationToken ct)
+    public ValueTask<LinkEntry?> GetAsync(string code, CancellationToken ct)
     {
         lock (_lock)
         {
             if (_items.TryGetValue(code, out LinkEntry? linkEntry))
             {
-                return ValueTask.FromResult<string?>(linkEntry.Url);
+                return ValueTask.FromResult<LinkEntry?>(linkEntry);
             }
         }
 
-        return ValueTask.FromResult<string?>(null);
+        return ValueTask.FromResult<LinkEntry?>(null);
     }
 
     public ValueTask<bool> TryAddAsync(string code, LinkEntry linkEntry, CancellationToken ct)
