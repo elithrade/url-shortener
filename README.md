@@ -4,22 +4,38 @@
 
 A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It's a learning project for system design: collisions, atomicity, concurrency, expiry and scaling. See `PLAN.md` for the roadmap and current milestone, and `LESSONS.md` for self-test flashcards built from the bugs and experiments in this repo.
 
-## Features (current)
-- `POST /shorten` validates the URL and returns a random 7-character base62 code, generated with `RandomNumberGenerator` (unbiased and unguessable).
-- URL validation (`UrlValidator`): absolute `http`/`https` only, at most 2048 characters, no embedded credentials, and no links back to the service's own host.
-- The service's public address comes from `Shortener:BaseUrl`, never from the request's `Host` header (which the client controls). It is used for the self-link check and to build `shortUrl`. It is checked at startup, and the app refuses to start without a valid one: absolute, `https` (or `http` in Development only), no path, query, fragment or user info. Development uses `http://localhost:5154` from `appsettings.Development.json`.
-- Expiry: every link expires. The client may send `expiresInSeconds` (60 to 31,536,000), and the default is 30 days. An expired link behaves exactly like an unknown one (`404`).
-- `GET /{code}` redirects to the stored URL with `302 Found`, or returns `404` if the code is unknown or expired.
-- `GET /{code}/stats` returns the click count of a link over a date range. Clicks are counted off the redirect path (a bounded channel, then batched writes), so the count lags by up to one flush interval (5 s by default) and clicks are dropped, not delayed, when the queue is full.
-- Two stores behind the `IUrlStore` interface, chosen by the `Storage` setting: `InMemory` (the default; a `Dictionary` guarded by a `Lock`) and `Postgres` (EF Core with Npgsql, where uniqueness comes from the primary key on the code and links are kept in the database). Entries are `LinkEntry(Url, ExpiresAt)`, and the expiry is checked on every read against an injected `TimeProvider`.
-- An optional Redis cache in front of the store (`CachedUrlStore`), on only when `ConnectionStrings:Redis` is set. A redirect checks Redis first and fills it on a miss; a cached link lives for the smaller of `Cache:TtlSeconds` (1 hour) and its remaining lifetime, and its expiry is still checked on every hit. Redirects keep working when Redis is down or slow (`Cache:TimeoutMilliseconds`, 200 ms): a failed cache call counts as a miss. Reads are counted as hit, miss or error (`dotnet-counters monitor -n Shortener --counters Shortener.Cache`).
-- Bounded retry on code collisions: up to 5 attempts, then `503`.
-- Rate limiting on `POST /shorten`: a token bucket per client IP (IPv6 reduced to its /64), with a burst of 5 and 1 more request per second by default. Over the limit, the response is `429` with `Retry-After` in whole seconds. `GET /{code}` is not limited.
-- A storage outage returns `503` (not retried, and with no details in the response). Other unexpected errors stay `500`.
-- Timeouts follow a deadline budget that shrinks inward, so each layer gives up before its caller: database connect 3 s and command 3 s (a request on a hung database gets `503`), host shutdown 12 s, container grace period 15 s (Compose). On SIGTERM the app stops taking connections, finishes requests in progress and exits `0`. Migrations get a 5-minute command timeout instead.
-- Logging: one JSON object per line outside Development (readable text under `dotnet run`), with scopes, so each entry carries the request's `TraceId`. One line per request with method, path, status and duration. Query strings, headers and bodies are never logged, since shortened URLs can carry tokens, and health probes are not logged. EF Core's per-command logs are `Information` in Development and `Warning` otherwise.
-- Health endpoints: `GET /health/live` runs no checks (the process answers), and `GET /health/ready` checks the dependencies (with Postgres, that the database accepts a connection, bounded to 2 seconds; always healthy with the in-memory store). Both return `200` (`Healthy`) or `503` (`Unhealthy`) and are not rate-limited.
-- Both stores implement `IExpirySweeper.SweepAsync()`, which removes expired entries (the Postgres store with one `DELETE`) and is tested. `ExpirySweepService` (a `BackgroundService` with a `PeriodicTimer`) calls it every 60 seconds, so expired entries are freed shortly after they expire (they are never served in the meantime, because reads check the expiry).
+## Features
+**Endpoints**
+- `POST /shorten` validates a URL and returns a random 7-character base62 code.
+- `GET /{code}` redirects with `302 Found`, or returns `404` for an unknown or expired code.
+- `GET /{code}/stats` returns a link's click count over a date range.
+- `GET /health/live` and `GET /health/ready` for probes (see Operations below).
+
+**Validation and abuse protection**
+- `UrlValidator` accepts absolute `http`/`https` URLs of at most 2048 characters, with no embedded credentials and no links back to this service.
+- The service's own address comes from the `Shortener:BaseUrl` setting, never from the request's `Host` header, which the client controls. It is used for the self-link check and to build `shortUrl`. The app refuses to start unless the value is absolute, `https` (`http` is allowed in Development only) and has no path, query, fragment or user info. Development uses `http://localhost:5154` from `appsettings.Development.json`.
+- `POST /shorten` is rate limited per client IP with a token bucket: a burst of 5, then 1 request per second. Over the limit it returns `429` with `Retry-After`. `GET /{code}` has no limit.
+
+**Expiry**
+- Every link expires. The client may send `expiresInSeconds` (60 to 31,536,000); the default is 30 days.
+- An expired link returns `404`, the same as an unknown code.
+- A background service deletes expired entries every 60 seconds. Reads check the expiry themselves, so an expired link is never served while it waits for the sweep.
+
+**Storage**
+- The `Storage` setting picks the store behind `IUrlStore`: `InMemory` (the default, a `Dictionary` behind a `Lock`) or `Postgres` (EF Core with Npgsql; the primary key on the code enforces uniqueness).
+- When two codes collide, the endpoint retries up to 5 times, then returns `503`.
+- An optional Redis cache (`CachedUrlStore`) sits in front of the store when `ConnectionStrings:Redis` is set. A redirect reads Redis first and fills it on a miss. A cached link lives for `Cache:TtlSeconds` (1 hour) or its remaining lifetime, whichever is shorter. If Redis is down or slower than `Cache:TimeoutMilliseconds` (200 ms), the read counts as a miss and goes to the store. Watch hits, misses and errors with `dotnet-counters monitor -n Shortener --counters Shortener.Cache`.
+
+**Click counting**
+- Redirects put clicks on a bounded in-memory queue, and a background service writes them in batches. The count can lag by one flush interval (5 s by default).
+- When the queue is full, new clicks are dropped so the redirect never waits.
+
+**Operations**
+- A storage outage returns `503` with an empty body and is not retried. Other unexpected errors return `500`.
+- Timeouts shrink from the outside in, so each layer gives up before its caller: database connect 3 s and command 3 s, host shutdown 12 s, container grace period 15 s. A request against a hung database gets `503`. Migrations get a 5-minute command timeout.
+- On SIGTERM the app stops accepting connections, finishes requests in progress and exits `0`.
+- Logs are one JSON object per line outside Development, and readable text under `dotnet run`. Each entry carries the request's `TraceId`. Every request gets one line with method, path, status and duration. Query strings, headers and bodies are never logged, because short URLs can carry tokens. Health probes are not logged. EF Core command logs are `Information` in Development and `Warning` otherwise.
+- `GET /health/live` runs no checks. `GET /health/ready` checks that Postgres accepts a connection within 2 seconds (it is always healthy with the in-memory store). Both return `200` or `503` and are not rate limited.
 
 ## Run
 ```bash
@@ -38,7 +54,14 @@ The app does not create its own schema. Run the one-shot migration step first, a
 Storage=Postgres ConnectionStrings__Shortener="Host=localhost;Username=postgres;Password=dev;Database=postgres" \
   dotnet run --project src/Shortener -- migrate
 ```
-`migrate` applies the EF Core migrations (`src/Shortener/Storage/Postgres/Migrations`) and exits without starting the web server. It exits `0` on success and `1` on failure (an unreachable database, or `Storage` not set to `Postgres`), and running it again is harmless. It does not create the database itself. Only one process should run it, which is why it is a separate step and not part of app startup (two `CREATE TABLE`s at once can race; measured in `PLAN.md`). The container above has no volume, so its data is lost when it stops.
+`migrate` applies the EF Core migrations in `src/Shortener/Storage/Postgres/Migrations` and exits without starting the web server:
+- It exits `0` on success and `1` on failure (an unreachable database, or `Storage` not set to `Postgres`).
+- Running it twice is safe.
+- It does not create the database.
+
+It is a separate step, not part of app startup, because only one process should run it: two `CREATE TABLE`s at once can race (measured in `PLAN.md`).
+
+The container above has no volume, so its data is lost when it stops.
 
 ### With Docker Compose
 `compose.yaml` runs Postgres (with a `pgdata` volume), Redis as a cache (100 MB, `allkeys-lru`, no persistence), the one-shot `migrate` service, and the app, in that order. Set `POSTGRES_PASSWORD` first (in the shell, or in an untracked `.env` file next to `compose.yaml`; any value without `;` or `=` works locally):
@@ -48,7 +71,10 @@ docker compose up -d --wait
 curl -i -X POST http://localhost:8080/shorten -H "Content-Type: application/json" -d '{"url":"https://example.com"}'
 docker compose down        # keeps the volume, so links survive; add -v to delete the data
 ```
-The password is only read when Postgres first creates its data directory, so changing it later needs `docker compose down -v`. The app listens on `8080` in the container. The Compose app runs as Development with `Shortener__BaseUrl=http://localhost:8080`, because Development is the only environment that accepts an `http` base URL. `appsettings*.json` is baked into the image, so a change there needs `docker compose up -d --build`; a change to `environment:` in `compose.yaml` only needs `docker compose up -d`.
+Things to know:
+- Postgres reads the password only when it first creates its data directory. To change it later, run `docker compose down -v`, which deletes the data.
+- The app listens on port `8080`. It runs as Development with `Shortener__BaseUrl=http://localhost:8080`, because only Development accepts an `http` base URL.
+- `appsettings*.json` is baked into the image, so after changing it run `docker compose up -d --build`. A change to `environment:` in `compose.yaml` only needs `docker compose up -d`.
 
 To add a migration after changing the model: `dotnet tool restore`, then `dotnet tool run dotnet-ef migrations add <Name> --project src/Shortener --output-dir Storage/Postgres/Migrations`, and change the generated namespace to `Shortener`.
 
@@ -67,12 +93,50 @@ dotnet test
 - The Redis tests also use Testcontainers (one shared `redis:7` container, a key prefix per test): the store contract run against the cache decorator, `CachedUrlStoreTests` (a miss fills the cache, a hit skips the store, the key's TTL, expiry on a hit by the app's clock, unusable cached values, Redis down, and the read counter) and `CacheEndpointTests` (the app with the cache switched on).
 - `ExpirySweepServiceTests`: the background service with a fake sweeper and a `FakeTimeProvider`: it sweeps once per interval and not before, keeps running after a sweep throws, and stops cleanly (nothing sweeps after stop).
 - `ShortenEndpointTests`: the real pipeline in memory with `WebApplicationFactory`: the round trip, error responses, canonical `Location` headers, the retry limit and `503` path using a fake store (`CollidingStore`), 200 concurrent POSTs, expiry through the endpoint with a fake clock, and a storage outage (`503`, not retried, nothing leaked) versus other store exceptions (`500`).
-- `RateLimitEndpointTests`: rate limiting through the real pipeline, with a small limit (`StrictRateLimitFactory`) and a test-only `IStartupFilter` that sets the client address from an `X-Test-Client-Ip` header (`TestServer` leaves it `null`): requests over the limit get `429` with `Retry-After: 3600`, one client over the limit doesn't limit another, clients without an address share one limit, and redirects are not limited. `ShortenEndpointTests` uses a generous limit (`GenerousRateLimitFactory`).
+- `RateLimitEndpointTests`: rate limiting through the real pipeline, with a small limit (`StrictRateLimitFactory`). `TestServer` leaves the client address `null`, so a test-only `IStartupFilter` (`RemoteIpStartupFilter`) sets it from an `X-Test-Client-Ip` header. Requests over the limit get `429` with `Retry-After: 3600`, one client over the limit doesn't limit another, clients without an address share one limit, and redirects are not limited. `ShortenEndpointTests` uses a generous limit (`GenerousRateLimitFactory`).
+- Click counting: `ClickRecorderTests` (the bounded queue and its drop count), `ClickFlushServiceTests` (batching, flush on tick or at the batch cap, drain on stop), `ClickStoreContractTests` (in-memory and Postgres), `ClicksEndpointTests` and `StatsEndpointTests`.
+- Startup and operations: `ShortenerOptionsValidatorTests` and `BaseUrlStartupTests` (a bad `BaseUrl` stops startup), `HealthEndpointTests` and `PostgresHealthEndpointTests`, `ShortenerLoggingTests` (no query strings or bodies in logs, no health lines) and `ForwardedHeadersTests`.
 
-Most tests were mutation-checked: the code was deliberately broken in a scratch copy (a removed lock, `>=` changed to `>`, an off-by-one retry, a biased generator, a wrong sweep interval) to confirm that a test fails.
+Most tests were mutation-checked: in a scratch copy, the code was broken on purpose (a removed lock, `>=` changed to `>`, an off-by-one retry, a biased generator, a wrong sweep interval) to confirm that a test fails.
+
+## Load tests
+[k6](https://github.com/grafana/k6/releases) sends redirects at a fixed rate and reports latency percentiles, and `dotnet-counters` shows the app's counters while it runs. The app runs on the host so `dotnet-counters` can attach to it. Postgres and Redis run in Compose under a separate project name, so the dev stack's database is never touched. Compare numbers between runs only: k6, the app and Docker share one machine.
+
+Install once: the k6 binary on your `PATH`, and `dotnet tool install --global dotnet-counters`.
+
+```bash
+# 1. Postgres and Redis on localhost (any password; it is fixed when the volume is first created)
+export POSTGRES_PASSWORD=loadtest
+docker compose -p shortener-load -f compose.yaml -f loadtest/compose.ports.yaml up -d --wait postgres redis
+loadtest/run-app.sh migrate          # first run only: applies the schema and exits
+
+# 2. The app: Release, Production, rate limit raised, logs in /tmp/shortener-load.log
+loadtest/run-app.sh                  # with the Redis cache
+REDIS=off loadtest/run-app.sh        # Postgres only, as a baseline
+
+# 3. In a second terminal: live counters (q quits)
+dotnet-counters monitor -n Shortener --counters Shortener.Cache,System.Runtime,Microsoft.AspNetCore.Hosting
+
+# 4. In a third terminal: the load
+k6 run loadtest/redirect.js
+k6 run -e RATE=500 -e DURATION=60s -e HOT_SHARE=0.8 loadtest/redirect.js
+
+# 5. Afterwards: stop and keep the data, or remove everything including the test database
+docker compose -p shortener-load -f compose.yaml -f loadtest/compose.ports.yaml stop
+docker compose -p shortener-load -f compose.yaml -f loadtest/compose.ports.yaml down -v
+```
+
+`loadtest/redirect.js` creates `LINKS` links in `setup()`, then calls `GET /{code}` `RATE` times a second for `DURATION` (k6's `constant-arrival-rate`, so a slow app shows up as higher latency, not fewer requests). `HOT_SHARE` sends that share of requests to the hottest 1% of codes; the default 0 picks codes uniformly. The settings and their defaults are listed at the top of the script.
+
+Reading the k6 summary:
+- Use the `{ scenario:redirects }` lines. The unfiltered ones also include the setup's POSTs.
+- `p(99)` is the time 99% of redirects beat. A flat `p(50)` with a climbing `p(99)` means a queue is forming, so the app is near its limit.
+- The thresholds (`http_req_failed` under 1%, `p(99)` under `P99_MS`, default 200 ms) mark the run ✓ or ✗, and k6 exits with 99 when one fails.
+- The cache hit rate is `hit / (hit + miss)` from `shortener.cache.reads`. With uniform picks it mostly reflects how many requests each code got, so compare runs with the same `LINKS`, `RATE`, `DURATION` and `HOT_SHARE`.
+- Lost clicks are not exposed as a counter: send a known number of redirects to one code, wait past `Clicks:FlushIntervalSeconds` (5 s), and compare with `GET /{code}/stats`.
 
 ## CI
-`.github/workflows/ci.yml` builds in Release and runs `dotnet test` on every push to `main` and on pull requests. The `main` branch has a ruleset that requires the `build` check and blocks force-pushes and deletion. The repository admin can bypass it, so for the owner the gate is advisory.
+`.github/workflows/ci.yml` builds in Release and runs `dotnet test` on every push to `main` and on pull requests. A ruleset on `main` requires the `build` check and blocks force-pushes and deletion. The repository admin can bypass it, so the owner can still push directly.
 
 ## Project layout
 ```
@@ -80,8 +144,9 @@ Shortener.slnx
 src/Shortener/            the web app: Program.cs, plus folders Api/, Caching/ (the Redis cache decorator and its connection settings), Clicks/ (the click recorder, its channel and the flush service), Expiry/, Proxy/ (trusted proxy options for forwarded headers), RateLimiting/ (the token bucket limiter on `POST /shorten`), Storage/ (interfaces, `StorageUnavailableException`, InMemory/ and Postgres/, which holds `SchemaMigrator` and the EF migrations) and Urls/
 tests/Shortener.Tests/    unit and endpoint tests, in folders that mirror src
 .editorconfig             4-space indent (2 for project, yml and json files)
-Dockerfile, compose.yaml  image for the app, and a local stack (Postgres, migrate step, app)
+Dockerfile, compose.yaml  image for the app, and a local stack (Postgres, Redis, migrate step, app)
 infra/                    Azure stage 1: Bicep templates and the deploy steps
+loadtest/                 the k6 redirect test, a script that starts the app for it, and a Compose override that publishes Postgres and Redis
 .github/workflows/        CI, the deploy, the nightly Postgres stop and a manual Postgres delete
 dotnet-tools.json         the local `dotnet-ef` tool
 PLAN.md                   roadmap and current milestone
@@ -226,29 +291,33 @@ for i in $(seq 1 100); do
     -d "{\"url\":\"https://example.com/$i\"}" &
 done | sort | uniq -c; wait
 ```
-Expected: 62 × `201` and 38 × `503`, with the number of successes never above 62. A `503` means five attempts in a row collided, not necessarily that the keyspace is full. Failures become frequent as the table fills.
+Expected: 62 × `201` and 38 × `503`, with never more than 62 successes. A `503` means five attempts in a row collided, which can happen before the keyspace is full. Failures get more frequent as the table fills.
 
 Set `CodeLength` back to `7` afterwards.
 
 ## Design decisions
-- **Random codes** from `RandomNumberGenerator.GetString`, 7 characters of base62. The keyspace is 62⁷ ≈ 3.5 trillion. `Random` is statistically fair but predictable (a seeded `Random` repeats exactly, and its state can be recovered from a few outputs), so it must not be used for codes. Collisions are rare, but the store still has to detect them.
-- **Store arbitrates, caller retries.** `IUrlStore.TryAddAsync` is the only atomic check and insert. The endpoint generates the code and retries on `false`.
-- **302, not 301.** Browsers don't cache a 302, so expiry, deletion and click counting see every request.
-- **Not idempotent.** Submitting the same URL twice gives two codes.
-- **Validation is an allowlist.** Only absolute `http`/`https` URLs are accepted. A blocklist of bad schemes always misses one, and `Uri.TryCreate(..., UriKind.Absolute)` alone accepts `javascript:` and, on Linux, `/etc/passwd` as a `file:` URI.
-- **Credentials in URLs are rejected.** `https://google.com@evil.com` actually goes to `evil.com`, which is a phishing trick, and credentials shouldn't end up in the database or logs.
-- **Self-links are rejected** by comparing hosts, to avoid redirect chains and loops. The comparison uses the request's `Host` header, which the client controls, so a deployment should compare against a configured base URL instead.
+- **Random codes** come from `RandomNumberGenerator.GetString`: 7 base62 characters, so 62⁷ ≈ 3.5 trillion possible codes. `Random` is statistically fair but predictable (a seeded `Random` repeats exactly, and its state can be recovered from a few outputs), so codes never use it. Collisions are rare, but the store still has to detect them.
+- **The store arbitrates and the caller retries.** `IUrlStore.TryAddAsync` is the only atomic check-and-insert. The endpoint generates a code and retries when it returns `false`.
+- **302 instead of 301.** Browsers don't cache a 302, so expiry, deletion and click counting see every request.
+- **Shortening is not idempotent.** Submitting the same URL twice gives two codes.
+- **Validation is an allowlist.** Only absolute `http`/`https` URLs pass. A blocklist of bad schemes always misses one, and `Uri.TryCreate(..., UriKind.Absolute)` on its own accepts `javascript:` and, on Linux, `/etc/passwd` as a `file:` URI.
+- **Credentials in URLs are rejected.** `https://google.com@evil.com` goes to `evil.com`, a phishing trick, and credentials shouldn't end up in the database or logs.
+- **Self-links are rejected** by comparing the URL's host with the host of `Shortener:BaseUrl`, to avoid redirect chains and loops. The request's `Host` header is not used, because the client controls it.
 - **Error messages describe the rule** the client must meet, and say nothing about the implementation.
 - The store keeps the canonical URL (`AbsoluteUri`) in a `LinkEntry`, not the raw input, and `GetAsync` returns only the URL, so the expiry decision stays inside the store.
 - **Expiry is an absolute time, computed on the server from a duration.** The client sends seconds, not a timestamp, so a wrong client clock or a missing time zone can't matter. Times are `DateTimeOffset` in UTC. The default is 30 days, and the range is 60 seconds to 365 days, so every link has a bounded lifetime.
 - **Expired means missing.** The check runs on every read (`now >= ExpiresAt`), so a link never redirects after its expiry, even before any cleanup. It returns `404`, the same as an unknown code, so a caller can't tell whether a code ever existed.
 - **Reads never delete.** An expired entry keeps occupying its code until a sweep removes it, so a code isn't reissued while stale links may still circulate. After a sweep the code can be reused. That is accepted for now. At large scale the persistent store needs a never-reissue policy (Postgres has no native TTL, so the sweeper's `DELETE` is what frees a code; see `PLAN.md`).
 - **A storage outage is a 503, translated by the store.** Each store turns its own provider errors into `StorageUnavailableException` (for Postgres, a transient `NpgsqlException` found in the inner chain, because EF wraps it in an `InvalidOperationException`), and the endpoints catch only that type, so the endpoint code does not depend on a database. An outage is not retried (the retry loop is for collisions), the response has no body, and other exceptions stay `500`.
-- **Rate limiting is a token bucket per client, on writes only.** A bucket holds up to `RateLimit:Capacity` tokens (default 5) and refills `RateLimit:TokensPerPeriod` tokens every `RateLimit:PeriodSeconds` seconds (default 1 per second). Defaults are in `appsettings.json`; override them with environment variables (`RateLimit__Capacity=10`). A missing setting stops startup. Only `POST /shorten` is limited, through an `IEndpointFilter`: writes are where abuse gets in, while many real users share one IP on reads. The key is the client IP, with IPv6 reduced to its /64 (one user usually controls a whole /64) and IPv4-mapped addresses normalized. The limiter itself knows nothing about HTTP and reports the wait to the tick; the filter rounds it up to whole seconds for `Retry-After`. A clock corrected backwards counts as no time passed.
-- **Behind a proxy, the client IP is the proxy's.** `RemoteIpAddress` is then the same for everyone, so all clients would share one limit. A deployment behind a reverse proxy needs `ForwardedHeaders` with the proxy listed as trusted (never trust `X-Forwarded-For` from anyone). A request with no address at all (for example over a Unix socket) uses one shared fallback limit and logs a warning.
+- **Rate limiting is a token bucket per client, on writes only.**
+  - A bucket holds up to `RateLimit:Capacity` tokens (default 5) and refills `RateLimit:TokensPerPeriod` tokens every `RateLimit:PeriodSeconds` seconds (default 1 per second). The defaults are in `appsettings.json`; override them with environment variables (`RateLimit__Capacity=10`). A missing setting stops startup.
+  - Only `POST /shorten` is limited, through an `IEndpointFilter`. Abuse comes in through writes, and on reads many real users can share one IP.
+  - The key is the client IP. IPv6 addresses are reduced to their /64, because one user usually controls a whole /64, and IPv4-mapped addresses are normalized to IPv4.
+  - The limiter knows nothing about HTTP and reports the wait to the tick. The filter rounds it up to whole seconds for `Retry-After`. If the clock is corrected backwards, the limiter counts it as no time passed.
+- **Behind a proxy, every request comes from the proxy's IP**, so all clients would share one limit. The `ForwardedHeaders` settings (`TrustedProxyOptions`, off by default) read the client IP from `X-Forwarded-For`, but only from a trusted proxy. Trusting that header from anyone would let a client pick its own rate-limit key. A request with no address at all (for example over a Unix socket) uses one shared fallback limit and logs a warning.
 - **Time is injected** (`TimeProvider`, registered as `TimeProvider.System`), so tests advance a `FakeTimeProvider` instead of sleeping.
 - **`IExpirySweeper` is a separate interface** implemented by both stores (Postgres has no native TTL, so its sweeper deletes the expired rows), while a store with native TTL, such as Redis, would not need it. Each store is registered once and both interfaces forward to that single instance.
-- **The sweep runs in a background service.** The host calls `ExecuteAsync` once, so the service owns the loop. A failed sweep is caught and logged inside the loop and the next tick still runs, and only a cancellation from shutdown ends the loop. The sweep is an O(n) scan that holds the store's lock, so concurrent reads wait for it (measured: about 11 ms per million entries when nothing expires, and about 46 ms when everything does).
+- **The sweep runs in a background service.** The host calls `ExecuteAsync` once, so the service owns the loop. A failed sweep is caught and logged inside the loop, and the next tick still runs. Only shutdown ends the loop. In memory, the sweep is an O(n) scan that holds the store's lock, so concurrent reads wait for it: measured at about 11 ms per million entries when nothing expires, and about 46 ms when everything does.
 
 ## Roadmap
 The detailed plan, with the current milestone and status, is in `PLAN.md`. In short:
@@ -257,7 +326,7 @@ The detailed plan, with the current milestone and status, is in `PLAN.md`. In sh
 3. Persistence behind `IUrlStore`: done for Postgres (the store, shared contract tests, registration, `503` on an outage, EF migrations with a one-shot `migrate` step, and Docker Compose with a data volume, checked by restarting the stack). A Redis cache sits in front of it (item 6).
 4. Abuse protection: done (rate limiting on `POST /shorten`, and a configured `BaseUrl` validated at startup). Config and ops: done (settings through `IOptions<T>`, health endpoints, structured JSON logging, graceful shutdown with a deadline budget).
 5. Deployment, stage 1: done (Azure Container Apps and Postgres from Bicep, a GitHub Actions deploy with OIDC that migrates, deploys and smoke-tests `/health/ready`).
-6. System design practice: click analytics done (`Channel<T>` off the redirect path, batched writes, `GET /{code}/stats`). A Redis read cache is built (cache-aside, safe when Redis is down); its hit rate is not measured yet. Next: a load test, multi-instance design, failure injection and a design write-up.
+6. System design practice: click analytics done (`Channel<T>` off the redirect path, batched writes, `GET /{code}/stats`). A Redis read cache is built (cache-aside, safe when Redis is down). The k6 load test is built (`loadtest/`), but the cache hit rate and redirect latency with click recording are not measured yet. After that: multi-instance design, failure injection and a design write-up.
 7. A UI.
 
 ## Related

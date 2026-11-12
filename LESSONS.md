@@ -1108,7 +1108,7 @@ Writes grow the table, use up the code space and are how spam and phishing links
 
 <details><summary>A chain of guard clauses (<code>if (bad) return Fail(...)</code>) keeps getting the next condition wrong. What technique helps?</summary>
 
-After each guard, write down what is now **known** to be true, because every later line only runs if the earlier checks passed. The next condition only has to handle what's left. Example for `BaseUrl`: after "has text", "parses as absolute" and "scheme is http or https", the dev rule only has to think about http: `parsedUrl.Scheme == "http" && !env.IsDevelopment()`. A first attempt, `!IsDevelopment() || Scheme != "http"`, failed https everywhere. Order matters: put the dev rule before the scheme check and it has to cover `ftp` too. A truth table of the four scheme × environment cases catches a flipped `!` or `==`.
+After each guard, write down what is now **known** to be true, because every later line only runs if the earlier checks passed. The next condition only has to handle what's left. Example for `BaseUrl`: after "has text", "parses as absolute" and "scheme is http or https", the dev rule only has to think about http: `parsedUrl.Scheme == "http" && !env.IsDevelopment()`. A first attempt, `!IsDevelopment() || Scheme != "http"`, failed https everywhere. If the dev rule came before the scheme check, it would have to cover `ftp` too. A truth table of the four scheme × environment cases catches a flipped `!` or `==`.
 </details>
 
 <details><summary>Removing a check leaves the whole suite green. What are the two possible reasons, and how do you tell them apart?</summary>
@@ -1203,7 +1203,7 @@ The package is public (a new GHCR package starts private and has to be switched 
 
 <details><summary>CI will "run the migration". Why does it start a Container Apps Job instead of running <code>migrate</code> on the GitHub runner?</summary>
 
-The runner sits outside Azure. Running `migrate` there would mean opening the Postgres firewall to GitHub's large, changing address ranges and copying the connection string into GitHub as well. The job runs inside the Container Apps environment, which the firewall already admits, with the secret it already has, so CI only needs the right to start it. Order matters: run the job before the app moves to a new image, so the new code never meets an old schema.
+The runner sits outside Azure. Running `migrate` there would mean opening the Postgres firewall to GitHub's large, changing address ranges and copying the connection string into GitHub as well. The job runs inside the Container Apps environment, which the firewall already admits, with the secret it already has, so CI only needs the right to start it. Run the job before the app moves to a new image, so the new code never meets an old schema.
 </details>
 
 <details><summary>A Bicep parameter is <code>@secure()</code> and read with <code>readEnvironmentVariable</code>. What do those two guard against, and what do they not?</summary>
@@ -1434,5 +1434,12 @@ Point `ConnectionStrings:Redis` at a port where nothing listens (`localhost:1`).
 <details><summary>Removing the <code>remaining &lt;= 0</code> guard before the cache write left every test green. Was a test missing?</summary>
 
 No: the guard was dead code. `GetAsync` reads `now` once, then calls the inner store, which checks expiry against its own, later clock reading. Any entry it returns has `ExpiresAt` after that later reading, so `ExpiresAt - now` is always positive. The guard would only matter if the clock were read again after the inner call: then a link in its last instant could give zero or less, and Redis rejects such a TTL. A surviving mutation means either a missing test or unreachable code, so check which before writing a test.
+</details>
+
+## 32. Load testing: percentiles
+
+<details><summary>What does p99 latency mean, and why track it instead of the average?</summary>
+
+p99 is the response time that 99% of requests beat: sort all requests by duration, and 1 in 100 is slower. The average hides the tail. In the first k6 run the average (1.97 ms) was almost three times p50 (0.69 ms), because a few slow requests (up to 190 ms) pulled it up, and it described no actual request. The tail matters because of fan-out: a user or page that makes n requests gets all of them under p99 with probability 0.99ⁿ, so with 100 requests about 63% (1 − 0.99¹⁰⁰) hit at least one slower one. Under rising load p99 usually jumps before p50 moves, because queues form first for the unlucky requests: a flat p50 with a climbing p99 means the system is near its limit.
 </details>
 

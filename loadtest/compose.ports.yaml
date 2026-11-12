@@ -1,0 +1,11 @@
+# Publishes Postgres and Redis on localhost so an app started with `dotnet run` can reach them
+# (and dotnet-counters can attach to it). Use with a separate project name, so the load-test
+# database never touches the dev stack's volume:
+#   docker compose -p shortener-load -f compose.yaml -f loadtest/compose.ports.yaml up -d --wait postgres redis
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
