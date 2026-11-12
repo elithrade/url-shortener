@@ -71,6 +71,42 @@ dotnet test
 
 Most tests were mutation-checked: the code was deliberately broken in a scratch copy (a removed lock, `>=` changed to `>`, an off-by-one retry, a biased generator, a wrong sweep interval) to confirm that a test fails.
 
+## Load tests
+[k6](https://github.com/grafana/k6/releases) sends redirects at a fixed rate and reports latency percentiles; `dotnet-counters` shows the app's counters while it runs. The app runs on the host (so `dotnet-counters` can attach), with Postgres and Redis from Compose under a separate project name, so the dev stack's database is never touched. The numbers are relative: k6, the app and Docker share one machine.
+
+Install once: the k6 binary on your `PATH`, and `dotnet tool install --global dotnet-counters`.
+
+```bash
+# 1. Postgres and Redis on localhost (any password; it is fixed when the volume is first created)
+export POSTGRES_PASSWORD=loadtest
+docker compose -p shortener-load -f compose.yaml -f loadtest/compose.ports.yaml up -d --wait postgres redis
+loadtest/run-app.sh migrate          # first run only: applies the schema and exits
+
+# 2. The app: Release, Production, rate limit raised, logs in /tmp/shortener-load.log
+loadtest/run-app.sh                  # with the Redis cache
+REDIS=off loadtest/run-app.sh        # Postgres only, as a baseline
+
+# 3. In a second terminal: live counters (q quits)
+dotnet-counters monitor -n Shortener --counters Shortener.Cache,System.Runtime,Microsoft.AspNetCore.Hosting
+
+# 4. In a third terminal: the load
+k6 run loadtest/redirect.js
+k6 run -e RATE=500 -e DURATION=60s -e HOT_SHARE=0.8 loadtest/redirect.js
+
+# 5. Afterwards: stop and keep the data, or remove everything including the test database
+docker compose -p shortener-load -f compose.yaml -f loadtest/compose.ports.yaml stop
+docker compose -p shortener-load -f compose.yaml -f loadtest/compose.ports.yaml down -v
+```
+
+`loadtest/redirect.js` creates `LINKS` links in `setup()`, then calls `GET /{code}` `RATE` times a second for `DURATION` (k6's `constant-arrival-rate`, so a slow app shows up as higher latency, not fewer requests). `HOT_SHARE` sends that share of requests to the hottest 1% of codes; the default 0 picks codes uniformly. The settings and their defaults are listed at the top of the script.
+
+Reading the k6 summary:
+- Use the `{ scenario:redirects }` lines. The unfiltered ones also include the setup's POSTs.
+- `p(99)` is the time 99% of redirects beat. A flat `p(50)` with a climbing `p(99)` means a queue is forming, so the app is near its limit.
+- The thresholds (`http_req_failed` under 1%, `p(99)` under `P99_MS`, default 200 ms) mark the run ✓ or ✗, and k6 exits with 99 when one fails.
+- The cache hit rate is `hit / (hit + miss)` from `shortener.cache.reads`. With uniform picks it mostly reflects how many requests each code got, so compare runs with the same `LINKS`, `RATE`, `DURATION` and `HOT_SHARE`.
+- Lost clicks are not exposed as a counter: send a known number of redirects to one code, wait past `Clicks:FlushIntervalSeconds` (5 s), and compare with `GET /{code}/stats`.
+
 ## CI
 `.github/workflows/ci.yml` builds in Release and runs `dotnet test` on every push to `main` and on pull requests. The `main` branch has a ruleset that requires the `build` check and blocks force-pushes and deletion. The repository admin can bypass it, so for the owner the gate is advisory.
 
@@ -82,6 +118,7 @@ tests/Shortener.Tests/    unit and endpoint tests, in folders that mirror src
 .editorconfig             4-space indent (2 for project, yml and json files)
 Dockerfile, compose.yaml  image for the app, and a local stack (Postgres, migrate step, app)
 infra/                    Azure stage 1: Bicep templates and the deploy steps
+loadtest/                 the k6 redirect test, a script that starts the app for it, and a Compose override that publishes Postgres and Redis
 .github/workflows/        CI, the deploy, the nightly Postgres stop and a manual Postgres delete
 dotnet-tools.json         the local `dotnet-ef` tool
 PLAN.md                   roadmap and current milestone
