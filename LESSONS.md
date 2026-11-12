@@ -1431,3 +1431,8 @@ They hide each other in a timing test: with fail-fast a command fails at once, s
 Point `ConnectionStrings:Redis` at a port where nothing listens (`localhost:1`). The redirect goes through `CachedUrlStore`, the cache read fails, and Postgres answers: that proves the decorator wraps the Postgres store. An always-in-memory decorator fails the test, because no in-memory store is registered in Postgres mode.
 </details>
 
+<details><summary>Removing the <code>remaining &lt;= 0</code> guard before the cache write left every test green. Was a test missing?</summary>
+
+No: the guard was dead code. `GetAsync` reads `now` once, then calls the inner store, which checks expiry against its own, later clock reading. Any entry it returns has `ExpiresAt` after that later reading, so `ExpiresAt - now` is always positive. The guard would only matter if the clock were read again after the inner call: then a link in its last instant could give zero or less, and Redis rejects such a TTL. A surviving mutation means either a missing test or unreachable code, so check which before writing a test.
+</details>
+
