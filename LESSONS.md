@@ -1393,3 +1393,41 @@ A decorator is swapped in transparently, so it must keep every promise the plain
 
 On a miss the decorator gets its data from the inner store through the interface. With only a URL it could not cache `ExpiresAt`, so it could not keep the cache TTL within the link's lifetime or check expiry on a hit. `GetAsync` now returns `LinkEntry?`. A decorator can only work with what the interface exposes, so wrapping a store is a good test of whether the interface says enough.
 </details>
+
+## 31. Redis cache: clocks, failures and counters
+
+<details><summary>A test advanced the <code>FakeTimeProvider</code> 20 minutes past a link's expiry, yet Redis still held the key. Why, and what does the store do about it?</summary>
+
+The fake clock only moves code that asks it. Redis runs on its own real clock, and for Redis a few milliseconds had passed of a 10-minute TTL. So the app's clock decides validity: every hit compares `ExpiresAt` with `TimeProvider` (`now >= ExpiresAt`, the same boundary as the stores), and Redis's TTL only frees memory. In production the same gap exists in milliseconds between two servers.
+</details>
+
+<details><summary>Redis was unreachable and <code>asyncTimeout</code> was 200 ms, yet one read took 6 s. Why?</summary>
+
+While disconnected, StackExchange.Redis queues commands in a backlog and waits for a connection, and that wait used the 5 s default, not `asyncTimeout` (the error said "timed out in the backlog ... (5000ms)"). `BacklogPolicy.FailFast` fails a command at once when there is no connection: the same read failed in 28 ms. For a cache a failed command is only a miss. A stopwatch assertion with a generous limit (under 2 s) found it.
+</details>
+
+<details><summary>Which exceptions must a cache catch around a Redis call, and what is the trap?</summary>
+
+`RedisException` (connection and server errors) and `RedisTimeoutException`. The trap: `RedisTimeoutException` derives from `TimeoutException`, not from `RedisException`, so catching only `RedisException` lets a slow Redis through. One filter covers both: `catch (Exception ex) when (ex is RedisException or RedisTimeoutException)`. The read and the write each need it: a failed write must not throw away an entry the store already returned.
+</details>
+
+<details><summary>The cached value was <code>{}</code>. Why did the redirect return 500, and what fixed it?</summary>
+
+By default `JsonSerializer.Deserialize<LinkEntry>("{}")` succeeds: missing constructor parameters get their defaults, so the result is an entry with a null `Url`, which the handler then passed to `Results.Redirect`. `JsonSerializerOptions.Strict` (.NET 10) rejects missing required parameters, nulls for non-nullable properties and unknown properties with a `JsonException`, which the existing catch turns into a miss. A cached `null` deserializes to null without throwing, so that needs its own check.
+</details>
+
+<details><summary>Counting hit, miss and error in five places counted some reads twice. What structure made "exactly one per call" hold?</summary>
+
+A failed read counted an error, then fell through to code that counted a miss; a flag fixed one path and the null-entry path broke the same way. The fix: move the cache read into a method that returns one result (`ReadCacheAsync` returns hit, miss or error), and count that result in one place. A method returns once, so no path can produce two counts, and later steps never ask what earlier ones did.
+</details>
+
+<details><summary>Removing fail-fast, or removing the short timeouts, each left every Redis-down test green. Why, and how are they tested?</summary>
+
+They hide each other in a timing test: with fail-fast a command fails at once, so the timeouts never matter; without it the 200 ms timeouts keep the wait under the test's limit. Only removing both showed (6 s). Settings like these are tested directly: `RedisConnectionTests` asserts the values `RedisConnection.Configure` returns.
+</details>
+
+<details><summary>How can a test check the app with Postgres and the cache without a Redis container?</summary>
+
+Point `ConnectionStrings:Redis` at a port where nothing listens (`localhost:1`). The redirect goes through `CachedUrlStore`, the cache read fails, and Postgres answers: that proves the decorator wraps the Postgres store. An always-in-memory decorator fails the test, because no in-memory store is registered in Postgres mode.
+</details>
+
