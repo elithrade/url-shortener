@@ -115,7 +115,7 @@ loadtest/run-app.sh                  # with the Redis cache
 REDIS=off loadtest/run-app.sh        # Postgres only, as a baseline
 
 # 3. In a second terminal: live counters (q quits)
-dotnet-counters monitor -n Shortener --counters Shortener.Cache,System.Runtime,Microsoft.AspNetCore.Hosting
+dotnet-counters monitor -n Shortener --counters Shortener.Cache,Npgsql,System.Runtime,Microsoft.AspNetCore.Hosting
 
 # 4. In a third terminal: the load
 k6 run loadtest/redirect.js
@@ -133,6 +133,8 @@ Reading the k6 summary:
 - `p(99)` is the time 99% of redirects beat. A flat `p(50)` with a climbing `p(99)` means a queue is forming, so the app is near its limit.
 - The thresholds (`http_req_failed` under 1%, `p(99)` under `P99_MS`, default 200 ms) mark the run ✓ or ✗, and k6 exits with 99 when one fails.
 - The cache hit rate is `hit / (hit + miss)` from `shortener.cache.reads`. With uniform picks it mostly reflects how many requests each code got, so compare runs with the same `LINKS`, `RATE`, `DURATION` and `HOT_SHARE`.
+- dotnet-counters shows running totals for most `System.Runtime` rows: note them before and after a run and divide the difference by the request count (CPU time, bytes allocated, lock contentions per redirect).
+- `Npgsql` shows the connection pool: `db.client.connection.count` (used and idle, against `db.client.connection.max`), `npgsql.pending_requests` (requests waiting for a connection) and `db.client.operation.duration`. Postgres allows 100 connections and the pool defaults to 100, so one app can take every slot.
 - Lost clicks are not exposed as a counter: send a known number of redirects to one code, wait past `Clicks:FlushIntervalSeconds` (5 s), and compare with `GET /{code}/stats`.
 
 ## CI

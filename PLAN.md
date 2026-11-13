@@ -294,7 +294,7 @@ Deploy steps are in `infra/README.md`; the stage 1 must-dos are under "Azure pla
 - A flaky startup test: `ObjectDisposedException` about one run in eight, from a race inside `WebApplicationFactory` when `ValidateOnStart` failed inside `app.Run()`. Fixed by running `IStartupValidator.Validate()` before `Run`
 
 ### 🟡 Line 2, item A: click analytics
-Done except the latency measurement (item D).
+Done. Item D measured redirects with click recording on: p95 under 1 ms at 10,000 a second with the cache. Not measured: a run with recording off for a before-and-after (needs a switch in the code).
 
 #### ✅ Click store
 - `IClickStore`
@@ -352,7 +352,7 @@ Done except the latency measurement (item D).
 - Mutations that turn a test red: `>=` at the cap, no cap, no order check, `-30` instead of `-29`, both dates defaulted together, `start` defaulted from today, no `503` catch, lenient `TryParse` instead of `TryParseExact`
 
 ### 🟡 Line 2, item B: Redis cache
-Built; the hit rate is not measured yet (item D).
+Built and measured in item D: at 10,000 redirects a second the cache cut latency about 3x and the app's CPU by about one core. The hit rate was close to 100%, which reflects the test's uniform picks over 1,000 links, not real traffic.
 
 #### ✅ `CachedUrlStore`
 - A cache-aside decorator around the real `IUrlStore`. A read checks Redis, and a miss reads the inner store and fills Redis. `TryAddAsync` and the sweeper go straight to the store
@@ -387,6 +387,41 @@ Built; the hit rate is not measured yet (item D).
 
 #### Azure option
 - Azure Cache for Redis retires on 2028-09-30. Its replacement, Azure Managed Redis, starts near US$12 a month (third-party listing, unverified) and cannot be stopped. The plan is Redis as its own container in Container Apps
+
+### 🟡 Line 2, item D: load test
+p99 measured and the bottleneck found; the fix is still to do.
+
+#### ✅ Tooling
+- k6 v2.3.0 and dotnet-counters, with `loadtest/` (steps in `README.md`, "Load tests"). The app runs on the host (Release, Production) against Postgres and Redis from Compose under `-p shortener-load`
+- One machine (8 cores, WSL) runs k6, the app and Docker, so the numbers compare runs with each other; they are not production capacity figures
+- `dropped_iterations` came from stalls: during a 250 ms pause about 500 requests are due, the 50 pre-allocated VUs are busy, and k6 drops iterations while it creates more. More pre-allocated VUs would avoid it
+
+#### ✅ Results (2026-11-13, 1,000 links, uniform picks, 60 s runs, 0 failed requests in each)
+| Rate | Redis | p50 | p95 | p99 | Notes |
+|---|---|---|---|---|---|
+| 2,000/s | off | 0.79 ms | 1.05 ms | 2.08 ms | About 2 requests in flight (rate × latency) |
+| 5,000/s | off | 0.80 ms | 1.54 ms | 2.26 ms | Only the tail moves |
+| 10,000/s | off | 1.45 ms | 4.15 ms | 8.35 ms | Machine 80% busy, app about 3 cores, Postgres about 0.3 |
+| 10,000/s | on | 0.51 ms | 0.93 ms | 2.96 ms | Machine 53% busy, app about 2 cores; a 332 ms stall at the start as 1,000 fresh codes missed together |
+| 10,000/s, cold start, 30 s | off | 1.77 ms | 104 ms | 127 ms | 11,430 iterations dropped, k6 at its 1,000-VU cap |
+
+- The knee is between 5,000 and 10,000/s without the cache: p50 doubled while the machine was 80% busy. Waiting grows steeply before 100% (about ρ / (1 − ρ) times the service time)
+- The prediction before the Redis run was "no difference, Postgres is idle". Wrong: the cost of a database read sits in the app, not on the Postgres server
+
+#### ✅ Bottleneck: the connection pool (Redis off)
+- Npgsql counters at 10,000/s from a cold start: 96 of 100 connections used, 818 requests waiting for one (`pending_requests`), a new connection takes 89 ms (p50) to 161 ms (p99) to open, a query takes 9 ms (p50) as the app sees it, and `prepared_ratio` is 0
+- Postgres `max_connections` is 100, so the pool took every slot. `psql` got `too many clients already` during the run, and idle pooled connections kept the slots afterwards
+- Little's law: 10,000/s × 9 ms ≈ 90 busy connections. At 0.5 ms per query it would be 5, so the fix is cheaper queries, not more connections
+- The warm Redis-off run (p99 8 ms) had its pool already open from the 2,000 and 5,000/s runs; the cold start shows the same bottleneck more sharply
+- The cache works because most redirects never need a connection. In a Redis outage the app is back to this behavior
+
+#### ⬜ The fix
+- One change, a prediction, and the same Redis-off run at 10,000/s with the Npgsql counters. Candidates: `Max Auto Prepare` (prediction: lower `operation.duration`, fewer busy connections) or `Minimum Pool Size` (prediction: no cold-start backlog)
+- `Max Pool Size` below `max_connections` (room for admin access and the migrate job) belongs to item C
+
+#### Not measured
+- Latency with click recording off, for item A's before-and-after
+- A realistic hit rate: more `LINKS` with `HOT_SHARE` (most links get few clicks, and each first click misses)
 
 ## Line 1: usable and deployed (v1)
 
@@ -485,13 +520,15 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Start each day by re-reading yesterday's diff, and end it with a committed state plus a note on what comes next.
 
 ## Next up
-Milestone 8 is done, and items A and B are built (see "Already done").
+Milestone 8 is done; items A and B are built and measured (see "Already done").
 
-1. **Line 2, item D (load test).** The k6 script is built (`loadtest/`, steps in `README.md`). Still to measure:
-   - redirect latency with click recording on (the last check for item A)
-   - the cache hit rate under load (the last check for item B)
-2. **Line 2, item C (multi-instance).** Set Npgsql's Max Pool Size so that replicas × pool stays under the server's limit. The pool defaults to 100 connections per connection string; Postgres allows 100 in all and Azure B1ms about 50. (A test that filled the pool locked a later test out; fixed with `ClearAllPools`.)
-3. **Line 2, item E (failure injection).** Include a stalled Redis, so a test covers the `RedisTimeoutException` catch that survives mutation today.
+1. **Line 2, item D: the fix.** Pick one candidate from item D, write down the prediction, change it, and rerun the Redis-off test at 10,000/s. Then D is done.
+2. **Line 2, item C (multi-instance).** Set Npgsql's Max Pool Size so that replicas × pool stays under the server's limit. The pool defaults to 100 connections per connection string; Postgres allows 100 in all and Azure B1ms about 50. Item D showed one instance with the default pool taking all 100. (A test that filled the pool locked a later test out; fixed with `ClearAllPools`.)
+3. **Line 2, item E (failure injection).**
+   - A stalled Redis, so a test covers the `RedisTimeoutException` catch that survives mutation today
+   - Redis killed mid-run: the app falls back to the pool-bound path measured in item D
+   - The cold-cache miss stampede (single-flight is one answer)
+   - Jittered TTLs: keys filled in the same second expire in the same second an hour later
 4. **Redis in Azure**, as its own Container App (see "Azure option" under item B).
 
 ## Open items (not scheduled)
