@@ -1443,3 +1443,15 @@ No: the guard was dead code. `GetAsync` reads `now` once, then calls the inner s
 p99 is the response time that 99% of requests beat: sort all requests by duration, and 1 in 100 is slower. The average hides the tail. In the first k6 run the average (1.97 ms) was almost three times p50 (0.69 ms), because a few slow requests (up to 190 ms) pulled it up, and it described no actual request. The tail matters because of fan-out: a user or page that makes n requests gets all of them under p99 with probability 0.99ⁿ, so with 100 requests about 63% (1 − 0.99¹⁰⁰) hit at least one slower one. Under rising load p99 usually jumps before p50 moves, because queues form first for the unlucky requests: a flat p50 with a climbing p99 means the system is near its limit.
 </details>
 
+## 33. Load testing: the connection pool
+
+<details><summary>At 10,000 redirects a second without the cache, the Postgres server used about 0.3 cores. Yet turning Redis on cut latency about 3x and saved the app a whole core. Why?</summary>
+
+The cost of a database read is mostly in the app, not on the server: EF Core building and running the query, renting a connection from the Npgsql pool, the round trip (here through Docker's port proxy), and waiting for a free connection. The Npgsql counters showed 96 of 100 connections in use and 818 requests waiting, each query taking 9 ms as the app saw it, and no prepared statements. A Redis hit is one `GET` on one shared, multiplexed connection, so most redirects never touch the pool. Looking at the Postgres server's CPU alone led to the wrong prediction ("the cache won't help"); measure the client side of a dependency too.
+</details>
+
+<details><summary>The app needed 96 connections and Postgres allows 100. Why is raising <code>max_connections</code> the wrong fix?</summary>
+
+Little's law: busy connections = queries per second × time per query. 10,000/s × 9 ms ≈ 90; at 0.5 ms per query it would be 5. The 9 ms was queueing (a machine 80% busy, a proxy hop), and more connections add more contenders for the same 8 cores. Each Postgres connection is a process, so past a small multiple of the core count throughput falls (HikariCP's pool-sizing guide starts from cores × 2 + disks). The fixes make queries cheaper (cache, prepared statements, fewer hops) and budget the connections: instances × `Max Pool Size` below `max_connections`, with room for admin access and migrations, or a pooler such as PgBouncer that multiplexes many clients onto few server connections. With the defaults (pool 100, server 100) one app took every slot, and `psql` got `too many clients already`.
+</details>
+
