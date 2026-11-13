@@ -30,6 +30,7 @@ All code stays in the single namespace `Shortener`.
   - `ClickRecorder`: a bounded channel. `Record` writes to it without waiting and counts rejected clicks in `Dropped`.
   - `ClickOptions`.
   - `ClickFlushService`: the consumer. It sums clicks by (code, day), flushes on a tick or at `MaxBatchSize`, adds failed batches to `Dropped`, and drains on stop.
+- `WarmUp/`: `WarmUpOptions` (`WarmUp` section: `Calls`, 0 turns it off; `Parallelism`; `DeadlineSeconds`). The warm-up service and the readiness signal are still to be written by the owner.
 - `Caching/`:
   - `CacheOptions`.
   - `RedisConnection`: the connection settings that keep a Redis outage cheap.

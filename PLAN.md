@@ -451,7 +451,12 @@ p99 measured, the bottleneck found, and the fix chosen (warm-up before readiness
 #### ⬜ The fix: warm-up before readiness
 - Chosen over `Max Auto Prepare` (steady state, still a candidate later) because the cold start was the largest measured effect. `Minimum Pool Size` was tried and ruled out (see above)
 - The idea: at startup the app runs its real lookup path a few hundred times, partly in parallel, before `/health/ready` reports 200. Bicep already gives Container Apps a readiness probe on `/health/ready`, so a replica gets no traffic until it is warm. It matters on every deploy, scale-out and scale-up from zero
-- Decisions open: block in `StartAsync` or listen with readiness at 503 (the usual pattern); call `IUrlStore.GetAsync` or the app's own endpoint (a code that does not exist: never cached, no click recorded); a count or a duration; on failure stay not-ready or report ready after a deadline with a warning
+- Decided:
+  - The app listens at once, and `/health/ready` returns 503 until warm-up finishes
+  - A separate hosted service calls `IUrlStore.GetAsync` with a code that does not exist (never cached, no click recorded). No new method on `IUrlStore`; with Redis on, DI resolves `CachedUrlStore`, so it warms both
+  - The call count and the parallelism are configurable; start with about 20 in parallel (a warm app needed 17 connections at 10,000/s) and a few hundred calls, and let the cold-start run decide
+  - On failure, report ready after a 15 s deadline and log a warning. One failing call can take up to 3 s (connect and command timeouts). Shutdown during warm-up ends it through the stopping token
+- Tests first: ready 503 before warm-up and 200 after; the store is called the configured number of times (`CountingUrlStore`); with a failing store, ready after the deadline and one warning (`FakeTimeProvider`, `FakeLogger`); shutdown mid-warm-up ends cleanly. Check existing tests that expect ready 200, since they may now race the warm-up
 - Prediction: a fresh app at 10,000/s with Redis off gets p99 near 5 ms instead of 115 ms
 - `Max Pool Size` below `max_connections` (room for admin access and the migrate job) belongs to item C
 
