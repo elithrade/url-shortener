@@ -389,39 +389,76 @@ Built and measured in item D: at 10,000 redirects a second the cache cut latency
 - Azure Cache for Redis retires on 2028-09-30. Its replacement, Azure Managed Redis, starts near US$12 a month (third-party listing, unverified) and cannot be stopped. The plan is Redis as its own container in Container Apps
 
 ### 🟡 Line 2, item D: load test
-p99 measured and the bottleneck found; the fix is still to do.
+p99 measured, the bottleneck found, and the fix chosen (warm-up before readiness); the fix is still to write.
 
 #### ✅ Tooling
 - k6 v2.3.0 and dotnet-counters, with `loadtest/` (steps in `README.md`, "Load tests"). The app runs on the host (Release, Production) against Postgres and Redis from Compose under `-p shortener-load`
 - One machine (8 cores, WSL) runs k6, the app and Docker, so the numbers compare runs with each other; they are not production capacity figures
 - `dropped_iterations` came from stalls: during a 250 ms pause about 500 requests are due, the 50 pre-allocated VUs are busy, and k6 drops iterations while it creates more. More pre-allocated VUs would avoid it
 
-#### ✅ Results (2026-11-13, 1,000 links, uniform picks, 60 s runs, 0 failed requests in each)
+#### ✅ Method
+- All runs: 1,000 links created in `setup()`, codes picked uniformly, 0 failed requests in every run. Compare the `{ scenario:redirects }` lines only
+- **Rising rates** (2,000, 5,000, 10,000/s for 60 s) on one app that stayed up between runs, so each run started warmer than the one before
+- **Cold runs:** a freshly started app, then 10,000/s for 30 s at once. Used for the minimum-pool experiment (`PG_OPTIONS="Minimum Pool Size=N;Maximum Pool Size=90"`, N = 0, 50, 80), with the number of open connections read from `pg_stat_activity` at "ready" and 5 s later
+- **Warm runs:** a freshly started app, 15 s at 1,000/s to warm it, then 10,000/s for 30 s. Used for the warm-up test and for the Redis comparison
+- **Measurements:** k6 for latency; dotnet-counters `collect` to CSV for the `Npgsql` meter (pool use, requests waiting, connection and query time) and `Shortener.Cache`; btop for the CPU split while running; `ps -o cputimes` per process before and after the 10,000/s phase for CPU seconds (whole seconds per process, so the roughly 90 Postgres connections, each under a second, rounded to 0)
+
+#### ✅ Results: rising rates on one app (2026-11-13)
 | Rate | Redis | p50 | p95 | p99 | Notes |
 |---|---|---|---|---|---|
 | 2,000/s | off | 0.79 ms | 1.05 ms | 2.08 ms | About 2 requests in flight (rate × latency) |
 | 5,000/s | off | 0.80 ms | 1.54 ms | 2.26 ms | Only the tail moves |
 | 10,000/s | off | 1.45 ms | 4.15 ms | 8.35 ms | Machine 80% busy, app about 3 cores, Postgres about 0.3 |
 | 10,000/s | on | 0.51 ms | 0.93 ms | 2.96 ms | Machine 53% busy, app about 2 cores; a 332 ms stall at the start as 1,000 fresh codes missed together |
-| 10,000/s, cold start, 30 s | off | 1.77 ms | 104 ms | 127 ms | 11,430 iterations dropped, k6 at its 1,000-VU cap |
 
 - The knee is between 5,000 and 10,000/s without the cache: p50 doubled while the machine was 80% busy. Waiting grows steeply before 100% (about ρ / (1 − ρ) times the service time)
 - The prediction before the Redis run was "no difference, Postgres is idle". Wrong: the cost of a database read sits in the app, not on the Postgres server
 
-#### ✅ Bottleneck: the connection pool (Redis off)
+#### ✅ Results: cold start (Redis off, 10,000/s for 30 s)
+| Minimum pool | Open at "ready" / 5 s later | p50 | p95 | p99 | Waiting (peak) | In use (peak) |
+|---|---|---|---|---|---|---|
+| 0 | 1 / 1 | 1.49 ms | 97 ms | 115 ms | 792 | 89 |
+| 50 | 1 / 1 | 1.65 ms | 89 ms | 113 ms | 683 | 76 |
+| 80 | 1 / 1 | 1.68 ms | 102 ms | 116 ms | 784 | 88 |
+| 0, after a 15 s warm-up at 1,000/s | 90 after the warm-up | 1.22 ms | 2.93 ms | 4.86 ms | 0 | 17 |
+
+- `Minimum Pool Size` does not open connections at startup: with 80, one connection was open (from the readiness check). It only stops the pool shrinking below N once N exist. Ruled out as the cold-start fix
+- A cold app at full load builds a queue that feeds itself: slow first requests pile up, the pile keeps every connection busy, each query waits longer (p99 34 ms as the app saw it, against 8 ms warm), and the backlog does not clear in 30 s. k6 hit its 1,000-VU cap and dropped about 8,000 iterations
+- A 15 s warm-up at 1,000/s removed almost all of it, paying the cold cost (its own p99 11 ms, max 205 ms) at a rate where it did no harm
+- Connections were probably not the main cold cost: `setup()` sends bursts of 100 parallel POSTs, so the pool grows early in the cold runs too, and they stayed slow. The likely cost is the code warming up (.NET optimizing hot methods, first-use costs in EF Core and Npgsql). The warm-up run warmed both, so it does not separate their shares
+
+#### ✅ Results: warmed apps, Redis off against on (10,000/s for 30 s)
+| | Redis off | Redis on |
+|---|---|---|
+| p50 / p95 / p99 | 1.24 / 3.12 / 5.28 ms | 0.50 / 0.73 / 1.48 ms |
+| max | 20.5 ms | 11.2 ms |
+| App CPU | 87 s (about 2.9 cores) | 59 s (about 2.0 cores) |
+| `docker-proxy` CPU | 28 s (Postgres port) | 14 s (Redis port) |
+| `redis-server` CPU | n/a | 6 s (about 0.2 cores) |
+| Measured total (Postgres not measured) | 115 s | 79 s |
+
+- Warm, the cache still makes redirects about 3x faster and saves the app about 0.9 cores for 0.2 cores of Redis. A Redis `GET` on one shared connection costs the app far less than an EF Core query through the pool
+- `docker-proxy` exists only because the test publishes ports; production has a network hop instead, so absolute numbers will differ
+- Without warm-up, the cache was also hiding the cold-start problem; with warm-up its gain is the per-request saving alone
+- What Redis costs besides CPU: a service to run (in Azure another container, or Azure Managed Redis from about US$12 a month, unverified), up to 100 MB of memory, and its failure modes (miss stampede on a cold cache; Redis down falls back to the pool-bound path). Worth it at this load, not for the current Azure traffic of one user
+
+#### ✅ Bottleneck: the connection pool, made worse by a cold start (Redis off)
 - Npgsql counters at 10,000/s from a cold start: 96 of 100 connections used, 818 requests waiting for one (`pending_requests`), a new connection takes 89 ms (p50) to 161 ms (p99) to open, a query takes 9 ms (p50) as the app sees it, and `prepared_ratio` is 0
 - Postgres `max_connections` is 100, so the pool took every slot. `psql` got `too many clients already` during the run, and idle pooled connections kept the slots afterwards
-- Little's law: 10,000/s × 9 ms ≈ 90 busy connections. At 0.5 ms per query it would be 5, so the fix is cheaper queries, not more connections
-- The warm Redis-off run (p99 8 ms) had its pool already open from the 2,000 and 5,000/s runs; the cold start shows the same bottleneck more sharply
+- Little's law: 10,000/s × 9 ms ≈ 90 busy connections. Warmed, the same load needed 17. The fix is cheaper and warmer queries, not more connections
 - The cache works because most redirects never need a connection. In a Redis outage the app is back to this behavior
 
-#### ⬜ The fix
-- One change, a prediction, and the same Redis-off run at 10,000/s with the Npgsql counters. Candidates: `Max Auto Prepare` (prediction: lower `operation.duration`, fewer busy connections) or `Minimum Pool Size` (prediction: no cold-start backlog)
+#### ⬜ The fix: warm-up before readiness
+- Chosen over `Max Auto Prepare` (steady state, still a candidate later) because the cold start was the largest measured effect. `Minimum Pool Size` was tried and ruled out (see above)
+- The idea: at startup the app runs its real lookup path a few hundred times, partly in parallel, before `/health/ready` reports 200. Bicep already gives Container Apps a readiness probe on `/health/ready`, so a replica gets no traffic until it is warm. It matters on every deploy, scale-out and scale-up from zero
+- Decisions open: block in `StartAsync` or listen with readiness at 503 (the usual pattern); call `IUrlStore.GetAsync` or the app's own endpoint (a code that does not exist: never cached, no click recorded); a count or a duration; on failure stay not-ready or report ready after a deadline with a warning
+- Prediction: a fresh app at 10,000/s with Redis off gets p99 near 5 ms instead of 115 ms
 - `Max Pool Size` below `max_connections` (room for admin access and the migrate job) belongs to item C
 
 #### Not measured
 - Latency with click recording off, for item A's before-and-after
 - A realistic hit rate: more `LINKS` with `HOT_SHARE` (most links get few clicks, and each first click misses)
+- Postgres CPU per run (the `ps` method rounds each connection to 0)
 
 ## Line 1: usable and deployed (v1)
 
@@ -522,7 +559,7 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 ## Next up
 Milestone 8 is done; items A and B are built and measured (see "Already done").
 
-1. **Line 2, item D: the fix.** Pick one candidate from item D, write down the prediction, change it, and rerun the Redis-off test at 10,000/s. Then D is done.
+1. **Line 2, item D: the fix.** Warm-up before readiness (decisions and prediction under item D). Tests first, then rerun the cold-start test at 10,000/s with Redis off. Then D is done.
 2. **Line 2, item C (multi-instance).** Set Npgsql's Max Pool Size so that replicas × pool stays under the server's limit. The pool defaults to 100 connections per connection string; Postgres allows 100 in all and Azure B1ms about 50. Item D showed one instance with the default pool taking all 100. (A test that filled the pool locked a later test out; fixed with `ClearAllPools`.)
 3. **Line 2, item E (failure injection).**
    - A stalled Redis, so a test covers the `RedisTimeoutException` catch that survives mutation today

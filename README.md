@@ -128,6 +128,21 @@ docker compose -p shortener-load -f compose.yaml -f loadtest/compose.ports.yaml 
 
 `loadtest/redirect.js` creates `LINKS` links in `setup()`, then calls `GET /{code}` `RATE` times a second for `DURATION` (k6's `constant-arrival-rate`, so a slow app shows up as higher latency, not fewer requests). `HOT_SHARE` sends that share of requests to the hottest 1% of codes; the default 0 picks codes uniformly. The settings and their defaults are listed at the top of the script.
 
+Warm or cold: a freshly started app is much slower for its first seconds (at 10,000/s without Redis, p99 115 ms cold against 5 ms warm; see `PLAN.md`, item D). Say which one a run measures:
+- Warm: start the app, run `k6 run -e RATE=1000 -e DURATION=15s loadtest/redirect.js`, then the real run.
+- Cold: start the app and run the real rate at once.
+- Several runs on one app get warmer each time, so compare runs started the same way.
+
+Extra connection-string keywords go in `PG_OPTIONS`, for example `PG_OPTIONS="Maximum Pool Size=90" loadtest/run-app.sh`. Keeping the pool below Postgres's 100 connections leaves room for `psql`, for example to count open connections:
+```bash
+docker exec shortener-load-postgres-1 psql -U postgres -d shortener -tAc "select count(*) from pg_stat_activity where backend_type = 'client backend'"
+```
+
+CPU per process during a run: read cumulative CPU seconds before and after, and subtract. The values are whole seconds per process, so many short-lived or lightly used processes (each Postgres connection) round to 0.
+```bash
+ps -C Shortener,postgres,redis-server,docker-proxy -o comm=,cputimes= | awk '{s[$1]+=$2} END {for (k in s) print k, s[k]}'
+```
+
 Reading the k6 summary:
 - Use the `{ scenario:redirects }` lines. The unfiltered ones also include the setup's POSTs.
 - `p(99)` is the time 99% of redirects beat. A flat `p(50)` with a climbing `p(99)` means a queue is forming, so the app is near its limit.
