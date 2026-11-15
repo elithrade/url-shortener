@@ -459,6 +459,11 @@ p99 measured, the bottleneck found, and the fix chosen (warm-up before readiness
 - Tests first: ready 503 before warm-up and 200 after; the store is called the configured number of times (`CountingUrlStore`); with a failing store, ready after the deadline and one warning (`FakeTimeProvider`, `FakeLogger`); shutdown mid-warm-up ends cleanly. Check existing tests that expect ready 200, since they may now race the warm-up
 - Prediction: a fresh app at 10,000/s with Redis off gets p99 near 5 ms instead of 115 ms
 - `Max Pool Size` below `max_connections` (room for admin access and the migrate job) belongs to item C
+- Progress:
+  - ✅ `WarmUpService` written: `Parallel.ForEachAsync` with `Parallelism` as the cap; looks up `WarmUpService.Code` (`~warmup`, outside `CodeGenerator`'s alphabet); only lookups that succeed count, so a failed one is retried after a 50 ms pause on the fake-able clock; the deadline and shutdown cancel through one linked token, handled once outside the loop; `Ready` completes in `finally`. Settings: 300 calls, 20 in parallel, 15 s deadline
+  - ✅ 13 service tests, with `GatedUrlStore` (held lookups, most in flight) and `FlakyUrlStore` (first N lookups fail). 12 of 13 mutations caught; the survivor (no filter on the retry catch) behaves the same, since the pause throws on the cancelled token
+  - ⬜ Register the service, add a readiness check that reads `Ready.IsCompleted` (tagged `ready`), turn on the 5 endpoint tests (`WarmUpEndpointTests`)
+  - ⬜ Rerun the cold-start test and record the result
 
 #### Not measured
 - Latency with click recording off, for item A's before-and-after
@@ -564,7 +569,7 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 ## Next up
 Milestone 8 is done; items A and B are built and measured (see "Already done").
 
-1. **Line 2, item D: the fix.** Warm-up before readiness (decisions and prediction under item D). Tests first, then rerun the cold-start test at 10,000/s with Redis off. Then D is done.
+1. **Line 2, item D: the fix.** Warm-up before readiness. The service and its tests are done; next, register it, add the readiness check and turn on the endpoint tests, then rerun the cold-start test at 10,000/s with Redis off. Then D is done.
 2. **Line 2, item C (multi-instance).** Set Npgsql's Max Pool Size so that replicas × pool stays under the server's limit. The pool defaults to 100 connections per connection string; Postgres allows 100 in all and Azure B1ms about 50. Item D showed one instance with the default pool taking all 100. (A test that filled the pool locked a later test out; fixed with `ClearAllPools`.)
 3. **Line 2, item E (failure injection).**
    - A stalled Redis, so a test covers the `RedisTimeoutException` catch that survives mutation today

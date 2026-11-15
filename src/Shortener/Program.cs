@@ -28,6 +28,7 @@ builder.Services.Configure<HostOptions>(o =>
 bool usePostgres = RegisterStorage(builder);
 RegisterCache(builder, usePostgres);
 RegisterClicks(builder);
+RegisterWarmUp(builder);
 RegisterRateLimiter(builder);
 RegisterShortenerOptions(builder);
 RegisterForwardedHeaders(builder);
@@ -160,6 +161,15 @@ static void RegisterCache(WebApplicationBuilder builder, bool usePostgres)
                 : sp.GetRequiredService<InMemoryUrlStore>()
         )
     );
+}
+
+static void RegisterWarmUp(WebApplicationBuilder builder)
+{
+    builder
+        .Services.AddOptions<WarmUpOptions>()
+        .BindConfiguration(WarmUpOptions.Section)
+        .ValidateDataAnnotations()
+        .ValidateOnStart();
 }
 
 static void RegisterClicks(WebApplicationBuilder builder)

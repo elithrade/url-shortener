@@ -30,7 +30,7 @@ All code stays in the single namespace `Shortener`.
   - `ClickRecorder`: a bounded channel. `Record` writes to it without waiting and counts rejected clicks in `Dropped`.
   - `ClickOptions`.
   - `ClickFlushService`: the consumer. It sums clicks by (code, day), flushes on a tick or at `MaxBatchSize`, adds failed batches to `Dropped`, and drains on stop.
-- `WarmUp/`: `WarmUpOptions` (`WarmUp` section: `Calls`, 0 turns it off; `Parallelism`; `DeadlineSeconds`). The warm-up service and the readiness signal are still to be written by the owner.
+- `WarmUp/`: `WarmUpOptions` (`WarmUp` section: `Calls`, 0 turns it off; `Parallelism`; `DeadlineSeconds`) and `WarmUpService`. The service looks up `WarmUpService.Code` (a code no link can have) `Calls` times, retries a failed lookup after a pause, and completes `Ready` when the calls finish or the deadline passes. It is not registered in `Program.cs` yet; the registration and the readiness check are still to be written by the owner.
 - `Caching/`:
   - `CacheOptions`.
   - `RedisConnection`: the connection settings that keep a Redis outage cheap.
@@ -41,7 +41,9 @@ Namespace `Shortener.Tests`. The test project has no `Program.cs` of its own. `W
 - Store behavior lives in abstract contract classes (`UrlStoreContractTests`, `ExpirySweeperContractTests`, `ClickStoreContractTests`), each with an in-memory and a Postgres subclass.
 - The Postgres tests need Docker running (Testcontainers, one shared container via `[Collection("postgres")]`).
 - The Redis tests need Docker too (`[Collection("redis")]`, `RedisFixture`). They never flush Redis; each store or app gets its own key prefix from `RedisFixture.UniquePrefix()`. A multiplexer on `localhost:1` (built with `RedisConnection.Configure`) stands in for a Redis that is down.
-- `CountingUrlStore` counts reads of the inner store. `TestMeters.CreateFactory()` with a `MetricCollector` reads a counter for one store.
+- `GatedUrlStore` holds every `GetAsync` until `Release` and records `MaxInFlight`; `WaitForArrivalsAsync(n)` waits until n calls are held. Never released, it is a stalled database (held calls still end on cancellation).
+- `FlakyUrlStore(n)` fails the first n lookups with `StorageUnavailableException`; with `int.MaxValue` it is a database that stays down.
+- `CountingUrlStore` counts reads of the inner store and records their codes (`Codes`). `TestMeters.CreateFactory()` with a `MetricCollector` reads a counter for one store.
 - `ShortenClientExtensions.PostShortenAsync` posts to `/shorten`, optionally with a forged `Host`, a `peer` (the address connected to the app, set through `RemoteIpStartupFilter`) and an `X-Forwarded-For` header.
 - `Concurrently.RunAsync` (or `RunSyncAsync` for synchronous work) starts N tasks behind one gate and releases them together. Lambdas over a `ValueTask` must be `async i => await ...`.
 - `FakeTimeProvider.AdvanceUntilAsync` advances step by step until a service acts. In .NET 10 a `BackgroundService` starts through `Task.Run`, so a first `Advance` can come before its timer exists.
