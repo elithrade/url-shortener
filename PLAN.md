@@ -388,8 +388,8 @@ Built and measured in item D: at 10,000 redirects a second the cache cut latency
 #### Azure option
 - Azure Cache for Redis retires on 2028-09-30. Its replacement, Azure Managed Redis, starts near US$12 a month (third-party listing, unverified) and cannot be stopped. The plan is Redis as its own container in Container Apps
 
-### 🟡 Line 2, item D: load test
-p99 measured, the bottleneck found, and the fix chosen (warm-up before readiness); the fix is still to write.
+### ✅ Line 2, item D: load test
+p99 measured, the bottleneck found, and the fix built and measured: a startup warm-up of 15,000 lookups brings a fresh app's p99 at 10,000/s (Redis off) from 115 ms to about 10 ms.
 
 #### ✅ Tooling
 - k6 v2.3.0 and dotnet-counters, with `loadtest/` (steps in `README.md`, "Load tests"). The app runs on the host (Release, Production) against Postgres and Redis from Compose under `-p shortener-load`
@@ -448,7 +448,7 @@ p99 measured, the bottleneck found, and the fix chosen (warm-up before readiness
 - Little's law: 10,000/s × 9 ms ≈ 90 busy connections. Warmed, the same load needed 17. The fix is cheaper and warmer queries, not more connections
 - The cache works because most redirects never need a connection. In a Redis outage the app is back to this behavior
 
-#### ⬜ The fix: warm-up before readiness
+#### ✅ The fix: warm-up before readiness
 - Chosen over `Max Auto Prepare` (steady state, still a candidate later) because the cold start was the largest measured effect. `Minimum Pool Size` was tried and ruled out (see above)
 - The idea: at startup the app runs its real lookup path a few hundred times, partly in parallel, before `/health/ready` reports 200. Bicep already gives Container Apps a readiness probe on `/health/ready`, so a replica gets no traffic until it is warm. It matters on every deploy, scale-out and scale-up from zero
 - Decided:
@@ -457,13 +457,30 @@ p99 measured, the bottleneck found, and the fix chosen (warm-up before readiness
   - The call count and the parallelism are configurable; start with about 20 in parallel (a warm app needed 17 connections at 10,000/s) and a few hundred calls, and let the cold-start run decide
   - On failure, report ready after a 15 s deadline and log a warning. One failing call can take up to 3 s (connect and command timeouts). Shutdown during warm-up ends it through the stopping token
 - Tests first: ready 503 before warm-up and 200 after; the store is called the configured number of times (`CountingUrlStore`); with a failing store, ready after the deadline and one warning (`FakeTimeProvider`, `FakeLogger`); shutdown mid-warm-up ends cleanly. Check existing tests that expect ready 200, since they may now race the warm-up
-- Prediction: a fresh app at 10,000/s with Redis off gets p99 near 5 ms instead of 115 ms
+- Prediction: a fresh app at 10,000/s with Redis off gets p99 near 5 ms instead of 115 ms. Partly wrong: with the first settings (300 calls) nothing changed; it took about 15,000 calls (see Result)
 - `Max Pool Size` below `max_connections` (room for admin access and the migrate job) belongs to item C
 - Progress:
   - ✅ `WarmUpService` written: `Parallel.ForEachAsync` with `Parallelism` as the cap; looks up `WarmUpService.Code` (`~warmup`, outside `CodeGenerator`'s alphabet); only lookups that succeed count, so a failed one is retried after a 50 ms pause on the fake-able clock; the deadline and shutdown cancel through one linked token, handled once outside the loop; `Ready` completes in `finally`. Settings: 300 calls, 20 in parallel, 15 s deadline
   - ✅ 13 service tests, with `GatedUrlStore` (held lookups, most in flight) and `FlakyUrlStore` (first N lookups fail). 12 of 13 mutations caught; the survivor (no filter on the retry catch) behaves the same, since the pause throws on the cancelled token
   - ✅ Registered: a singleton the host runs (`AddHostedService(sp => sp.GetRequiredService<WarmUpService>())`), so `WarmUpHealthCheck` (tagged `ready`, any store) reads the same instance; registering it twice gave two instances and a readiness that never turned 200. 5 endpoint tests: ready 503 while warming and 200 after, live 200, ready with `Calls` 0, redirects served while warming. Existing tests adjusted: the cache endpoint tests turn warm-up off (its misses inflated their counters), the Postgres readiness test waits for warm-up. The deploy smoke test retries `/health/ready` for about 60 s, which covers the 15 s deadline
-  - ⬜ Rerun the cold-start test and record the result
+  - ✅ Cold-start rerun (below); `Calls` raised to 15,000. The in-memory readiness test now waits for warm-up too
+- Result. Each run: a fresh database and app, Redis off, minimum pool 0, maximum 90, 10,000/s for 30 s; warm-up time is from `/health/live` to `/health/ready`:
+
+  | Calls | In parallel | Warm-up | p99 | max | Most waiting for a connection |
+  |---|---|---|---|---|---|
+  | none (earlier baseline) | | | 115 ms | | |
+  | 300 | 20 | 0.2 s | 116 ms | 221 ms | 791 |
+  | 1,000 | 20 | 0.2 s | 115 ms | 165 ms | 700 |
+  | 3,000 | 20 | 0.4 s | 113 ms | 216 ms | 689 |
+  | 7,000 | 20 | 0.7 s | 72 ms | 121 ms | 336 |
+  | 10,000 (two runs) | 20 | 1.1 s | 13.8 ms, 29.3 ms | 66 ms, 110 ms | 0, 1 |
+  | 15,000 (two runs) | 20 | 1.6 to 1.7 s | 9.4 ms, 11.9 ms | 79 ms, 113 ms | 0, 0 |
+  | 15,000 | 90 | 1.5 s | 7.6 ms | 20 ms | 0 |
+
+  - The number of calls is what fixes it, not the connections: 20 in parallel opens about 20, and a warm app used at most 23 at this rate; 90 only helped a little
+  - The cliff lies between 7,000 and 10,000; 10,000 sits on its edge (the repeat was 29 ms), so the setting is 15,000 for margin. Expect a longer warm-up on Azure (network hops), still inside the 15 s deadline
+  - Likely cause of the count (not measured): .NET recompiles a method optimized only after many calls and after startup settles, and a 0.2 s warm-up ends before that. Neither warm-up touched the HTTP pipeline, so the cold cost sits in the store path (EF Core and Npgsql)
+  - Each probe during warm-up logs a "Health check warm-up ... Unhealthy" line; a couple per start
 
 #### Not measured
 - Latency with click recording off, for item A's before-and-after
@@ -567,16 +584,15 @@ User accounts, link editing, custom aliases, QR codes. Any of these is a reasona
 - Start each day by re-reading yesterday's diff, and end it with a committed state plus a note on what comes next.
 
 ## Next up
-Milestone 8 is done; items A and B are built and measured (see "Already done").
+Milestone 8 is done; items A, B and D are built and measured (see "Already done").
 
-1. **Line 2, item D: the fix.** Warm-up before readiness. Built, registered and tested; next, rerun the cold-start test at 10,000/s with Redis off and record the result. Then D is done.
-2. **Line 2, item C (multi-instance).** Set Npgsql's Max Pool Size so that replicas × pool stays under the server's limit. The pool defaults to 100 connections per connection string; Postgres allows 100 in all and Azure B1ms about 50. Item D showed one instance with the default pool taking all 100. (A test that filled the pool locked a later test out; fixed with `ClearAllPools`.)
-3. **Line 2, item E (failure injection).**
+1. **Line 2, item C (multi-instance).** Set Npgsql's Max Pool Size so that replicas × pool stays under the server's limit. The pool defaults to 100 connections per connection string; Postgres allows 100 in all and Azure B1ms about 50. Item D showed one instance with the default pool taking all 100. (A test that filled the pool locked a later test out; fixed with `ClearAllPools`.)
+2. **Line 2, item E (failure injection).**
    - A stalled Redis, so a test covers the `RedisTimeoutException` catch that survives mutation today
    - Redis killed mid-run: the app falls back to the pool-bound path measured in item D
    - The cold-cache miss stampede (single-flight is one answer)
    - Jittered TTLs: keys filled in the same second expire in the same second an hour later
-4. **Redis in Azure**, as its own Container App (see "Azure option" under item B).
+3. **Redis in Azure**, as its own Container App (see "Azure option" under item B).
 
 ## Open items (not scheduled)
 **Rate limiting**
