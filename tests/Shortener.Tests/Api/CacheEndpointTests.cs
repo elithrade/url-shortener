@@ -72,6 +72,8 @@ public class CacheEndpointTests(RedisFixture redis, WebApplicationFactory<Progra
         {
             b.UseSetting("ConnectionStrings:Redis", redisConnectionString);
             b.UseSetting("Cache:KeyPrefix", prefix);
+            // warm-up lookups would add misses to the counters these tests read
+            b.UseSetting("WarmUp:Calls", "0");
         });
         var client = app.CreateClient(
             new WebApplicationFactoryClientOptions { AllowAutoRedirect = false }

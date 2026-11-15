@@ -1,5 +1,6 @@
 using System.Net;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Shortener.Tests;
 
@@ -24,6 +25,10 @@ public class HealthEndpointTests(WebApplicationFactory<Program> factory)
     {
         using var factory = _factory.WithWebHostBuilder(b => b.UseSetting("Storage", "InMemory"));
         var client = factory.CreateClient();
+        // readiness waits for the startup warm-up
+        await factory
+            .Services.GetRequiredService<WarmUpService>()
+            .Ready.WaitAsync(TimeSpan.FromSeconds(10));
 
         var response = await client.GetAsync("/health/ready");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);

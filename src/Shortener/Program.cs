@@ -28,6 +28,7 @@ builder.Services.Configure<HostOptions>(o =>
 bool usePostgres = RegisterStorage(builder);
 RegisterCache(builder, usePostgres);
 RegisterClicks(builder);
+RegisterWarmUp(builder);
 RegisterRateLimiter(builder);
 RegisterShortenerOptions(builder);
 RegisterForwardedHeaders(builder);
@@ -162,6 +163,19 @@ static void RegisterCache(WebApplicationBuilder builder, bool usePostgres)
     );
 }
 
+static void RegisterWarmUp(WebApplicationBuilder builder)
+{
+    builder.Services.AddSingleton<WarmUpService>();
+
+    builder
+        .Services.AddOptions<WarmUpOptions>()
+        .BindConfiguration(WarmUpOptions.Section)
+        .ValidateDataAnnotations()
+        .ValidateOnStart();
+
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<WarmUpService>());
+}
+
 static void RegisterClicks(WebApplicationBuilder builder)
 {
     builder
@@ -265,6 +279,8 @@ static void RegisterHealthChecks(WebApplicationBuilder builder, bool usePostgres
             timeout: TimeSpan.FromSeconds(DbHealthCheckTimeoutSeconds)
         );
     }
+
+    checks.AddCheck<WarmUpHealthCheck>("warm-up", tags: [ReadyTag]);
 }
 
 static async Task<int> RunMigrationAsync(WebApplication app, bool usePostgres)

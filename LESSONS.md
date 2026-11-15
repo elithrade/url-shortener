@@ -1443,3 +1443,36 @@ No: the guard was dead code. `GetAsync` reads `now` once, then calls the inner s
 p99 is the response time that 99% of requests beat: sort all requests by duration, and 1 in 100 is slower. The average hides the tail. In the first k6 run the average (1.97 ms) was almost three times p50 (0.69 ms), because a few slow requests (up to 190 ms) pulled it up, and it described no actual request. The tail matters because of fan-out: a user or page that makes n requests gets all of them under p99 with probability 0.99ⁿ, so with 100 requests about 63% (1 − 0.99¹⁰⁰) hit at least one slower one. Under rising load p99 usually jumps before p50 moves, because queues form first for the unlucky requests: a flat p50 with a climbing p99 means the system is near its limit.
 </details>
 
+## 33. Load testing: the connection pool
+
+<details><summary>How did load testing find the cold-start problem, and what made the conclusion trustworthy?</summary>
+
+Two Redis-off runs at 10,000/s disagreed (p99 8 ms against 127 ms). Asking what differed found it: the fast run came after warmer runs on the same app, the slow one used a fresh app. Then controlled runs, a fresh app and database each time, one change each: minimum pool 0, 50 and 80 (no effect; it opens nothing at startup), then a 15 s warm-up at 1,000/s (p99 5 ms). Two predictions were wrong ("Redis won't help", "a warm pool fixes it"), and each pointed to the real cause; k6 gave the latency, the Npgsql counters (`pending_requests`, connections in use) said why. Rules: control the starting state, change one thing, write the prediction down first, and treat runs that disagree as a clue, not as noise. Fix: warm-up before readiness. Its first measurement broke the prediction too: 300 lookups changed nothing (p99 116 ms); stepping the count found the cliff between 7,000 and 10,000, and 15,000 gave about 10 ms in two runs.
+</details>
+
+<details><summary>At 10,000 redirects a second without the cache, the Postgres server used about 0.3 cores. Yet turning Redis on cut latency about 3x and saved the app a whole core. Why?</summary>
+
+The cost of a database read is mostly in the app, not on the server: EF Core building and running the query, renting a connection from the Npgsql pool, the round trip (here through Docker's port proxy), and waiting for a free connection. The Npgsql counters showed 96 of 100 connections in use and 818 requests waiting, each query taking 9 ms as the app saw it, and no prepared statements. A Redis hit is one `GET` on one shared, multiplexed connection, so most redirects never touch the pool. Looking at the Postgres server's CPU alone led to the wrong prediction ("the cache won't help"); measure the client side of a dependency too.
+</details>
+
+<details><summary>The app needed 96 connections and Postgres allows 100. Why is raising <code>max_connections</code> the wrong fix?</summary>
+
+Little's law: busy connections = queries per second × time per query. 10,000/s × 9 ms ≈ 90; at 0.5 ms per query it would be 5. The 9 ms was queueing (a machine 80% busy, a proxy hop), and more connections add more contenders for the same 8 cores. Each Postgres connection is a process, so past a small multiple of the core count throughput falls (HikariCP's pool-sizing guide starts from cores × 2 + disks). The fixes make queries cheaper (cache, prepared statements, fewer hops) and budget the connections: instances × `Max Pool Size` below `max_connections`, with room for admin access and migrations, or a pooler such as PgBouncer that multiplexes many clients onto few server connections. With the defaults (pool 100, server 100) one app took every slot, and `psql` got `too many clients already`.
+</details>
+
+<details><summary>A fresh app at 10,000/s had p99 115 ms; <code>Minimum Pool Size=80</code> did not change it, but a 15 s warm-up at 1,000/s brought it to 5 ms. Why both results?</summary>
+
+`Minimum Pool Size` only stops the pool shrinking below N once N connections exist; it opens nothing at startup (one connection was open at "ready", from the readiness check). And connections were not the main cold cost anyway: a cold app runs unoptimized code and pays first-use costs (.NET optimizes hot methods after many calls; EF Core and Npgsql set things up on first use), so at full load it starts slower than requests arrive. The queue keeps every connection busy, each query waits longer, and the backlog feeds itself for the whole run. A warm-up pays those costs at a low rate where nobody waits. In production the same applies to every deploy, scale-out and scale-up from zero, which is why apps warm up before their readiness probe reports ready.
+</details>
+
+## 34. Warm-up: cancellation and retries
+
+<details><summary>A retry loop runs inside <code>Parallel.ForEachAsync</code> with a deadline token. Why must its <code>catch</code> let cancellation through, and where is the deadline handled?</summary>
+
+Cancellation arrives as an exception: when the token fires, whatever is waiting (a lookup, a pause) throws `OperationCanceledException`, and it travels outward until a catch takes it. Each wrong place for that catch gave a different bug in `WarmUpService`. Caught nowhere, it left `ExecuteAsync` and the host shut the app down. Caught by the catch-all, the deadline was logged as "calls failed". Caught inside the retry loop, the loop called `GetAsync` again with the cancelled token, which threw at once: 83,775 warnings in 500 ms and never ready. A log line placed after the `await` never ran, because a failed `await` acts like a `throw`. A filter on the deadline token alone missed shutdown, so stopping took the whole deadline. The rules: inside the loop, catch only real failures (`when (!callToken.IsCancellationRequested)`) and pause on the same token; outside, catch the cancellation once and ask which source fired (shutdown: nothing, deadline: one warning); complete `Ready` in `finally`.
+</details>
+
+<details><summary>The warm-up made 300 lookups before readiness and the cold start was unchanged (p99 116 ms). 15,000 lookups fixed it (about 10 ms). Why does the count matter, and how was 15,000 chosen?</summary>
+
+300 lookups at 20 in parallel took 0.2 s and opened 20 connections, and a warm app needs only about 20 at that rate, so connections were not the missing piece (90 in parallel helped only a little). The likely cause is the code: .NET recompiles a method optimized only after many calls and once startup settles, and a 0.2 s warm-up ends first (not measured directly). Fresh runs at 1,000, 3,000, 7,000, 10,000 and 15,000 calls gave p99 115, 113, 72, 14 then 29, and 9 then 12 ms: a cliff, not a slope. The lowest working value sat on the edge in its repeat, so the setting has margin above it. A fix's size needs its own measurement: "warm up before readiness" was right, "a few hundred calls" was a guess.
+</details>

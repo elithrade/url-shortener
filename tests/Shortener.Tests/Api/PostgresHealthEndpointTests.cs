@@ -1,5 +1,6 @@
 using System.Net;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Shortener.Tests;
 
@@ -16,6 +17,10 @@ public class PostgresHealthEndpointTests(
             b.UseSetting("Storage", "Postgres")
                 .UseSetting("ConnectionStrings:Shortener", fixture.ConnectionString)
         );
+
+        await factory
+            .Services.GetRequiredService<WarmUpService>()
+            .Ready.WaitAsync(TimeSpan.FromSeconds(10));
 
         var client = factory.CreateClient();
         var response = await client.GetAsync("/health/ready");

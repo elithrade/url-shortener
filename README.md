@@ -35,7 +35,7 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It'
 - Timeouts shrink from the outside in, so each layer gives up before its caller: database connect 3 s and command 3 s, host shutdown 12 s, container grace period 15 s. A request against a hung database gets `503`. Migrations get a 5-minute command timeout.
 - On SIGTERM the app stops accepting connections, finishes requests in progress and exits `0`.
 - Logs are one JSON object per line outside Development, and readable text under `dotnet run`. Each entry carries the request's `TraceId`. Every request gets one line with method, path, status and duration. Query strings, headers and bodies are never logged, because short URLs can carry tokens. Health probes are not logged. EF Core command logs are `Information` in Development and `Warning` otherwise.
-- `GET /health/live` runs no checks. `GET /health/ready` checks that Postgres accepts a connection within 2 seconds (it is always healthy with the in-memory store). Both return `200` or `503` and are not rate limited.
+- `GET /health/live` runs no checks. `GET /health/ready` returns `503` until the startup warm-up ends (see `WarmUp` in `appsettings.json`: lookups made, how many at once, and a deadline after which the app reports ready anyway), and checks that Postgres accepts a connection within 2 seconds. Both return `200` or `503` and are not rate limited.
 
 ## Run
 ```bash
@@ -115,7 +115,7 @@ loadtest/run-app.sh                  # with the Redis cache
 REDIS=off loadtest/run-app.sh        # Postgres only, as a baseline
 
 # 3. In a second terminal: live counters (q quits)
-dotnet-counters monitor -n Shortener --counters Shortener.Cache,System.Runtime,Microsoft.AspNetCore.Hosting
+dotnet-counters monitor -n Shortener --counters Shortener.Cache,Npgsql,System.Runtime,Microsoft.AspNetCore.Hosting
 
 # 4. In a third terminal: the load
 k6 run loadtest/redirect.js
@@ -128,11 +128,28 @@ docker compose -p shortener-load -f compose.yaml -f loadtest/compose.ports.yaml 
 
 `loadtest/redirect.js` creates `LINKS` links in `setup()`, then calls `GET /{code}` `RATE` times a second for `DURATION` (k6's `constant-arrival-rate`, so a slow app shows up as higher latency, not fewer requests). `HOT_SHARE` sends that share of requests to the hottest 1% of codes; the default 0 picks codes uniformly. The settings and their defaults are listed at the top of the script.
 
+Warm or cold: a freshly started app is much slower for its first seconds (at 10,000/s without Redis, p99 115 ms cold against 5 ms warm; see `PLAN.md`, item D). Say which one a run measures:
+- Warm: start the app, run `k6 run -e RATE=1000 -e DURATION=15s loadtest/redirect.js`, then the real run.
+- Cold: start the app and run the real rate at once.
+- Several runs on one app get warmer each time, so compare runs started the same way.
+
+Extra connection-string keywords go in `PG_OPTIONS`, for example `PG_OPTIONS="Maximum Pool Size=90" loadtest/run-app.sh`. Keeping the pool below Postgres's 100 connections leaves room for `psql`, for example to count open connections:
+```bash
+docker exec shortener-load-postgres-1 psql -U postgres -d shortener -tAc "select count(*) from pg_stat_activity where backend_type = 'client backend'"
+```
+
+CPU per process during a run: read cumulative CPU seconds before and after, and subtract. The values are whole seconds per process, so many short-lived or lightly used processes (each Postgres connection) round to 0.
+```bash
+ps -C Shortener,postgres,redis-server,docker-proxy -o comm=,cputimes= | awk '{s[$1]+=$2} END {for (k in s) print k, s[k]}'
+```
+
 Reading the k6 summary:
 - Use the `{ scenario:redirects }` lines. The unfiltered ones also include the setup's POSTs.
 - `p(99)` is the time 99% of redirects beat. A flat `p(50)` with a climbing `p(99)` means a queue is forming, so the app is near its limit.
 - The thresholds (`http_req_failed` under 1%, `p(99)` under `P99_MS`, default 200 ms) mark the run ✓ or ✗, and k6 exits with 99 when one fails.
 - The cache hit rate is `hit / (hit + miss)` from `shortener.cache.reads`. With uniform picks it mostly reflects how many requests each code got, so compare runs with the same `LINKS`, `RATE`, `DURATION` and `HOT_SHARE`.
+- dotnet-counters shows running totals for most `System.Runtime` rows: note them before and after a run and divide the difference by the request count (CPU time, bytes allocated, lock contentions per redirect).
+- `Npgsql` shows the connection pool: `db.client.connection.count` (used and idle, against `db.client.connection.max`), `npgsql.pending_requests` (requests waiting for a connection) and `db.client.operation.duration`. Postgres allows 100 connections and the pool defaults to 100, so one app can take every slot.
 - Lost clicks are not exposed as a counter: send a known number of redirects to one code, wait past `Clicks:FlushIntervalSeconds` (5 s), and compare with `GET /{code}/stats`.
 
 ## CI
