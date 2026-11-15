@@ -590,7 +590,11 @@ Milestone 8 is done; items A, B and D are built and measured (see "Already done"
 2. **Line 2, item E (failure injection).**
    - A stalled Redis, so a test covers the `RedisTimeoutException` catch that survives mutation today
    - Redis killed mid-run: the app falls back to the pool-bound path measured in item D
-   - The cold-cache miss stampede (single-flight is one answer)
+   - The cold-cache miss stampede, first (started Nov 15). Plan: single-flight per instance, so concurrent misses for one code share one database lookup (with N instances, up to N lookups per key; a Redis lock was judged not worth its complexity here)
+     - Decided (Nov 15): inside `CachedUrlStore`. The shared unit is `inner.GetAsync` plus the Redis `SET`, so a cold key costs one query and one write, and Postgres is also shielded while Redis is down. It reads its own `now` for the TTL and passes `CancellationToken.None` to the inner store
+     - The owner writes it. Traps: `GetOrAdd` can run its factory twice (store a `Lazy<Task>`); the shared lookup must not use one caller's token (each caller waits with `WaitAsync(ct)`); a failed lookup fails all waiters but is removed, so the next call retries; remove with `TryRemove(KeyValuePair)` so a newer lookup is not deleted
+     - Progress (Nov 15): the five tests are stubbed in `CachedUrlStoreTests`. The first two (shared lookup, failure and retry) are written and red on `Gets`. Next: the cancellation test (cancel the caller that starts the lookup; `Gets == 1` is the red assert, `InFlight == 1` guards the token), then the last two, then the implementation
+     - Tests first: 100 concurrent reads of one code with a held inner store reach it once; a failure reaches every waiter and the next call queries again; one cancelled caller does not cancel the others; different codes do not wait for each other; nothing is left in flight afterwards
    - Jittered TTLs: keys filled in the same second expire in the same second an hour later
 3. **Redis in Azure**, as its own Container App (see "Azure option" under item B).
 

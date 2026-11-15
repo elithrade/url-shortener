@@ -1476,3 +1476,17 @@ Cancellation arrives as an exception: when the token fires, whatever is waiting 
 
 300 lookups at 20 in parallel took 0.2 s and opened 20 connections, and a warm app needs only about 20 at that rate, so connections were not the missing piece (90 in parallel helped only a little). The likely cause is the code: .NET recompiles a method optimized only after many calls and once startup settles, and a 0.2 s warm-up ends first (not measured directly). Fresh runs at 1,000, 3,000, 7,000, 10,000 and 15,000 calls gave p99 115, 113, 72, 14 then 29, and 9 then 12 ms: a cliff, not a slope. The lowest working value sat on the edge in its repeat, so the setting has margin above it. A fix's size needs its own measurement: "warm up before readiness" was right, "a few hundred calls" was a guess.
 </details>
+
+## 35. Failure: when the cache is down
+
+<details><summary>Interview question: "what happens if the cache goes down?" Why is "we spin up a new one and the database takes the hit meanwhile" a weak answer, and what is a strong one?</summary>
+
+The cache exists because the database cannot serve the full read load: at a 99% hit rate the database sees 1% of reads, and without the cache it sees 100 times that. Item D measured a mild version: at 10,000/s with Redis off the pool hit its 100-connection limit, over 800 requests waited for a connection, and p99 went over 100 ms. With real traffic the database falls over and the whole site is down. A new cache also starts empty, so every hot key misses at once and stampedes the database while it is weakest. A strong answer has three layers. Make it rare: replicated or managed Redis with failover. Protect the database meanwhile: fail fast on cache errors (a short timeout; here 200 ms), a circuit breaker that stops calling a dead cache, single-flight so a hot key costs one query per instance, and load shedding (cap queries in flight, return 503 to the excess). Recover gently: warm hot keys or ramp traffic; coalescing keeps the refill from stampeding.
+</details>
+
+## 36. Testing concurrency: holding calls at a gate
+
+<details><summary>A test starts 100 reads with <code>var results = await Concurrently.RunAsync(...)</code> against a <code>GatedUrlStore</code>, then calls <code>WaitForArrivalsAsync(1)</code> and <code>Release()</code>. It hangs forever. Why, and why does starting the run without <code>await</code> still work?</summary>
+
+Tasks in .NET start when they are created; `await` only pauses the caller until a task finishes. `RunAsync` ends in `Task.WhenAll`, so awaiting it waits for all 100 reads, and each read is held at the gate until `Release()`, which comes after that `await` and never runs. The reads pass `CancellationToken.None`, so nothing else ends them. Written as `var run = Concurrently.RunAsync(...)`, the reads still run on the thread pool. The test goes on to `WaitForArrivalsAsync(1)`, which waits on a different signal: each call releases the `_arrived` semaphore as it enters, before it parks on the gate. So the test can see a call has arrived while the call is still held, then `Release()`, then `await run` (with `WaitAsync` and a timeout, so a broken implementation fails instead of hanging).
+</details>

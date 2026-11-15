@@ -223,6 +223,120 @@ public class CachedUrlStoreTests(RedisFixture redis)
 
     private static readonly DateTimeOffset Now = new(2026, 1, 1, 22, 0, 0, TimeSpan.Zero);
 
+    // Single-flight: concurrent misses for one code share one inner lookup. Each test holds the
+    // inner store with a GatedUrlStore: Create(innerStore: gated).
+
+    // Fire with Concurrently.RunAsync, WaitForArrivalsAsync(1), pause ~200 ms, assert
+    // MaxInFlight == 1 (and Inner.Gets == 1) before Release; then every caller gets the result.
+    [Fact]
+    public async Task Concurrent_misses_for_one_code_share_one_inner_lookup()
+    {
+        var gated = new GatedUrlStore();
+        try
+        {
+            var (store, innerStore, _, _) = Create(innerStore: gated);
+
+            var run = Concurrently.RunAsync(
+                100, // 100 callers flooding the store
+                async _ => await store.GetAsync("abc", CancellationToken.None)
+            );
+
+            await gated.WaitForArrivalsAsync(1);
+            // give other 99 callers to reach the shared wait
+            await Task.Delay(200);
+
+            gated.Release();
+
+            var results = await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.All(results, Assert.Null);
+            Assert.Equal(1, gated.MaxInFlight);
+            Assert.Equal(1, innerStore.Gets);
+        }
+        finally
+        {
+            gated.Release();
+        }
+    }
+
+    // Hold the lookup, then gated.Fail(...): every waiter throws that exception. A read after
+    // that reaches the inner store again (Inner.Gets == 2), so the failure was not kept.
+    [Fact]
+    public async Task A_failed_lookup_fails_every_waiter_and_the_next_read_retries()
+    {
+        var gated = new GatedUrlStore();
+        try
+        {
+            var (store, innerStore, _, _) = Create(innerStore: gated);
+
+            var run = Concurrently.RunAsync(
+                100,
+                async _ =>
+                {
+                    try
+                    {
+                        await store.GetAsync("abc", CancellationToken.None);
+                        return null;
+                    }
+                    catch (Exception ex)
+                    {
+                        return ex;
+                    }
+                }
+            );
+
+            await gated.WaitForArrivalsAsync(1);
+            // give other 99 callers to reach the shared wait
+            await Task.Delay(200);
+
+            var exception = new StorageUnavailableException(
+                "Store not ready",
+                new TimeoutException()
+            );
+            gated.Fail(exception);
+
+            var results = await run.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.All(results, r => Assert.Same(exception, r));
+
+            Assert.Equal(1, gated.MaxInFlight);
+            Assert.Equal(1, innerStore.Gets);
+
+            await Assert.ThrowsAsync<StorageUnavailableException>(async () =>
+                await store.GetAsync("abc", CancellationToken.None)
+            );
+
+            Assert.Equal(2, innerStore.Gets);
+        }
+        finally
+        {
+            gated.Release();
+        }
+    }
+
+    // Two callers wait on a held lookup; cancel one's token. It throws OperationCanceledException,
+    // gated.InFlight stays 1 (the shared lookup was not cancelled), and after Release the other
+    // caller completes.
+    [Fact]
+    public async Task A_cancelled_caller_does_not_cancel_the_shared_lookup()
+    {
+        Assert.Fail("not written");
+    }
+
+    // Hold a read of one code, then read another: both reach the gate (MaxInFlight == 2).
+    [Fact]
+    public async Task Misses_for_different_codes_do_not_wait_for_each_other()
+    {
+        Assert.Fail("not written");
+    }
+
+    // After a round completes, a new read reaches the inner store again. GatedUrlStore returns
+    // null, which never fills Redis, so the second read is a real miss.
+    [Fact]
+    public async Task A_finished_lookup_is_not_left_in_flight()
+    {
+        Assert.Fail("not written");
+    }
+
     // set by Create(); xUnit makes a new instance of this class for each test
     private MetricCollector<long>? _reads;
 
@@ -234,16 +348,17 @@ public class CachedUrlStoreTests(RedisFixture redis)
             .Sum(m => m.Value);
 
     // a cached store around an in-memory store, with its own key prefix; pass a multiplexer to
-    // replace the shared container's (for the Redis-down test). Inner counts its reads (Gets).
+    // replace the shared container's (for the Redis-down test), or an innerStore to use in place of
+    // the in-memory one (a GatedUrlStore for single-flight). Inner counts its reads (Gets).
     private (
         CachedUrlStore Store,
         CountingUrlStore Inner,
         FakeTimeProvider Clock,
         string Prefix
-    ) Create(IConnectionMultiplexer? multiplexer = null)
+    ) Create(IConnectionMultiplexer? multiplexer = null, IUrlStore? innerStore = null)
     {
         var clock = new FakeTimeProvider(Now);
-        var inner = new CountingUrlStore(new InMemoryUrlStore(clock));
+        var inner = new CountingUrlStore(innerStore ?? new InMemoryUrlStore(clock));
         var prefix = RedisFixture.UniquePrefix();
         var meters = TestMeters.CreateFactory();
         _reads = new MetricCollector<long>(
