@@ -30,7 +30,7 @@ All code stays in the single namespace `Shortener`.
   - `ClickRecorder`: a bounded channel. `Record` writes to it without waiting and counts rejected clicks in `Dropped`.
   - `ClickOptions`.
   - `ClickFlushService`: the consumer. It sums clicks by (code, day), flushes on a tick or at `MaxBatchSize`, adds failed batches to `Dropped`, and drains on stop.
-- `WarmUp/`: `WarmUpOptions` (`WarmUp` section: `Calls`, 0 turns it off; `Parallelism`; `DeadlineSeconds`) and `WarmUpService`. The service looks up `WarmUpService.Code` (a code no link can have) `Calls` times, retries a failed lookup after a pause, and completes `Ready` when the calls finish or the deadline passes. It is not registered in `Program.cs` yet; the registration and the readiness check are still to be written by the owner.
+- `WarmUp/`: `WarmUpOptions` (`WarmUp` section: `Calls`, 0 turns it off; `Parallelism`; `DeadlineSeconds`) and `WarmUpService`. The service looks up `WarmUpService.Code` (a code no link can have) `Calls` times, retries a failed lookup after a pause, and completes `Ready` when the calls finish or the deadline passes. It is registered as a singleton, and the host runs that same instance, so `WarmUpHealthCheck` (tagged `ready`) reads its `Ready`. `/health/ready` is 503 until warm-up ends.
 - `Caching/`:
   - `CacheOptions`.
   - `RedisConnection`: the connection settings that keep a Redis outage cheap.
@@ -42,6 +42,7 @@ Namespace `Shortener.Tests`. The test project has no `Program.cs` of its own. `W
 - The Postgres tests need Docker running (Testcontainers, one shared container via `[Collection("postgres")]`).
 - The Redis tests need Docker too (`[Collection("redis")]`, `RedisFixture`). They never flush Redis; each store or app gets its own key prefix from `RedisFixture.UniquePrefix()`. A multiplexer on `localhost:1` (built with `RedisConnection.Configure`) stands in for a Redis that is down.
 - `GatedUrlStore` holds every `GetAsync` until `Release` and records `MaxInFlight`; `WaitForArrivalsAsync(n)` waits until n calls are held. Never released, it is a stalled database (held calls still end on cancellation).
+- With warm-up on, a test that expects `/health/ready` to be 200 waits for `WarmUpService.Ready` first; tests that count store reads or cache counters set `WarmUp:Calls` to 0.
 - `FlakyUrlStore(n)` fails the first n lookups with `StorageUnavailableException`; with `int.MaxValue` it is a database that stays down.
 - `CountingUrlStore` counts reads of the inner store and records their codes (`Codes`). `TestMeters.CreateFactory()` with a `MetricCollector` reads a counter for one store.
 - `ShortenClientExtensions.PostShortenAsync` posts to `/shorten`, optionally with a forged `Host`, a `peer` (the address connected to the app, set through `RemoteIpStartupFilter`) and an `X-Forwarded-For` header.

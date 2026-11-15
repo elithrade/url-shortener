@@ -5,8 +5,8 @@ namespace Shortener;
 // Makes WarmUpOptions.Calls store lookups at startup, at most Parallelism at once, so the app
 // reports ready with its code warmed up and pool connections open. Reports ready anyway after
 // DeadlineSeconds.
-// Not registered in Program.cs yet: a BackgroundService that throws stops the host, and with
-// it every endpoint test.
+// No exception may leave ExecuteAsync: a BackgroundService that throws stops the host.
+// Registered as a singleton that the host runs, so WarmUpHealthCheck reads the same instance.
 public sealed partial class WarmUpService(
     IUrlStore store,
     TimeProvider clock,

@@ -35,7 +35,7 @@ A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It'
 - Timeouts shrink from the outside in, so each layer gives up before its caller: database connect 3 s and command 3 s, host shutdown 12 s, container grace period 15 s. A request against a hung database gets `503`. Migrations get a 5-minute command timeout.
 - On SIGTERM the app stops accepting connections, finishes requests in progress and exits `0`.
 - Logs are one JSON object per line outside Development, and readable text under `dotnet run`. Each entry carries the request's `TraceId`. Every request gets one line with method, path, status and duration. Query strings, headers and bodies are never logged, because short URLs can carry tokens. Health probes are not logged. EF Core command logs are `Information` in Development and `Warning` otherwise.
-- `GET /health/live` runs no checks. `GET /health/ready` checks that Postgres accepts a connection within 2 seconds (it is always healthy with the in-memory store). Both return `200` or `503` and are not rate limited.
+- `GET /health/live` runs no checks. `GET /health/ready` returns `503` until the startup warm-up ends (see `WarmUp` in `appsettings.json`: lookups made, how many at once, and a deadline after which the app reports ready anyway), and checks that Postgres accepts a connection within 2 seconds. Both return `200` or `503` and are not rate limited.
 
 ## Run
 ```bash
