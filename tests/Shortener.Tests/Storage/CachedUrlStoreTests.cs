@@ -319,14 +319,60 @@ public class CachedUrlStoreTests(RedisFixture redis)
     [Fact]
     public async Task A_cancelled_caller_does_not_cancel_the_shared_lookup()
     {
-        Assert.Fail("not written");
+        var gated = new GatedUrlStore();
+        try
+        {
+            var (store, innerStore, _, _) = Create(innerStore: gated);
+
+            using var sourceOne = new CancellationTokenSource();
+
+            var taskOne = store.GetAsync("abc", sourceOne.Token).AsTask();
+            await gated.WaitForArrivalsAsync(1);
+
+            var taskB = store.GetAsync("abc", CancellationToken.None).AsTask();
+            await Task.Delay(200);
+
+            sourceOne.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => taskOne);
+
+            Assert.Equal(1, gated.InFlight);
+            gated.Release();
+
+            var result = await taskB.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Null(result);
+            Assert.Equal(1, innerStore.Gets);
+        }
+        finally
+        {
+            gated.Release();
+        }
     }
 
     // Hold a read of one code, then read another: both reach the gate (MaxInFlight == 2).
     [Fact]
     public async Task Misses_for_different_codes_do_not_wait_for_each_other()
     {
-        Assert.Fail("not written");
+        var gated = new GatedUrlStore();
+        try
+        {
+            var (store, innerStore, _, _) = Create(innerStore: gated);
+
+            var taskOne = store.GetAsync("abc", CancellationToken.None).AsTask();
+            var taskTwo = store.GetAsync("def", CancellationToken.None).AsTask();
+            await gated.WaitForArrivalsAsync(2);
+
+            gated.Release();
+
+            var results = await Task.WhenAll(taskOne, taskTwo).WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.All(results, Assert.Null);
+            Assert.Equal(2, gated.MaxInFlight);
+            Assert.Equal(2, innerStore.Gets);
+        }
+        finally
+        {
+            gated.Release();
+        }
     }
 
     // After a round completes, a new read reaches the inner store again. GatedUrlStore returns
@@ -334,7 +380,28 @@ public class CachedUrlStoreTests(RedisFixture redis)
     [Fact]
     public async Task A_finished_lookup_is_not_left_in_flight()
     {
-        Assert.Fail("not written");
+        var gated = new GatedUrlStore();
+        try
+        {
+            var (store, innerStore, _, _) = Create(innerStore: gated);
+
+            var taskOne = store.GetAsync("abc", CancellationToken.None).AsTask();
+            await gated.WaitForArrivalsAsync(1);
+
+            gated.Release();
+
+            var result = await taskOne.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Null(result);
+
+            result = await store.GetAsync("abc", CancellationToken.None);
+
+            Assert.Null(result);
+            Assert.Equal(2, innerStore.Gets);
+        }
+        finally
+        {
+            gated.Release();
+        }
     }
 
     // set by Create(); xUnit makes a new instance of this class for each test
