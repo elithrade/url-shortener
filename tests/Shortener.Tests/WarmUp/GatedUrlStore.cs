@@ -38,6 +38,9 @@ internal sealed class GatedUrlStore : IUrlStore
     // lets every held call through, and every later call passes straight through
     public void Release() => _gate.TrySetResult();
 
+    // fails every held call with `exception`, and every later call fails at once
+    public void Fail(Exception exception) => _gate.TrySetException(exception);
+
     // waits until `count` more calls have reached the gate since the last wait
     public async Task WaitForArrivalsAsync(int count, TimeSpan? timeout = null)
     {

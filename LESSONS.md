@@ -1476,3 +1476,34 @@ Cancellation arrives as an exception: when the token fires, whatever is waiting 
 
 300 lookups at 20 in parallel took 0.2 s and opened 20 connections, and a warm app needs only about 20 at that rate, so connections were not the missing piece (90 in parallel helped only a little). The likely cause is the code: .NET recompiles a method optimized only after many calls and once startup settles, and a 0.2 s warm-up ends first (not measured directly). Fresh runs at 1,000, 3,000, 7,000, 10,000 and 15,000 calls gave p99 115, 113, 72, 14 then 29, and 9 then 12 ms: a cliff, not a slope. The lowest working value sat on the edge in its repeat, so the setting has margin above it. A fix's size needs its own measurement: "warm up before readiness" was right, "a few hundred calls" was a guess.
 </details>
+
+## 35. Failure: when the cache is down
+
+<details><summary>Interview question: "what happens if the cache goes down?" Why is "we spin up a new one and the database takes the hit meanwhile" a weak answer, and what is a strong one?</summary>
+
+The cache exists because the database cannot serve the full read load: at a 99% hit rate the database sees 1% of reads, and without the cache it sees 100 times that. Item D measured a mild version: at 10,000/s with Redis off the pool hit its 100-connection limit, over 800 requests waited for a connection, and p99 went over 100 ms. With real traffic the database falls over and the whole site is down. A new cache also starts empty, so every hot key misses at once and stampedes the database while it is weakest. A strong answer has three layers. Make it rare: replicated or managed Redis with failover. Protect the database meanwhile: fail fast on cache errors (a short timeout; here 200 ms), a circuit breaker that stops calling a dead cache, single-flight so a hot key costs one query per instance, and load shedding (cap queries in flight, return 503 to the excess). Recover gently: warm hot keys or ramp traffic; coalescing keeps the refill from stampeding.
+</details>
+
+## 36. Testing concurrency: holding calls at a gate
+
+<details><summary>A test starts 100 reads with <code>var results = await Concurrently.RunAsync(...)</code> against a <code>GatedUrlStore</code>, then calls <code>WaitForArrivalsAsync(1)</code> and <code>Release()</code>. It hangs forever. Why, and why does starting the run without <code>await</code> still work?</summary>
+
+Tasks in .NET start when they are created; `await` only pauses the caller until a task finishes. `RunAsync` ends in `Task.WhenAll`, so awaiting it waits for all 100 reads, and each read is held at the gate until `Release()`, which comes after that `await` and never runs. The reads pass `CancellationToken.None`, so nothing else ends them. Written as `var run = Concurrently.RunAsync(...)`, the reads still run on the thread pool. The test goes on to `WaitForArrivalsAsync(1)`, which waits on a different signal: each call releases the `_arrived` semaphore as it enters, before it parks on the gate. So the test can see a call has arrived while the call is still held, then `Release()`, then `await run` (with `WaitAsync` and a timeout, so a broken implementation fails instead of hanging).
+</details>
+
+## 37. Single-flight
+
+<details><summary>Single-flight keeps the lookups in progress in a <code>ConcurrentDictionary</code>. Why store <code>Lazy&lt;Task&lt;T&gt;&gt;</code> and not <code>Task&lt;T&gt;</code>?</summary>
+
+A `Task` is hot: creating it starts the query. `GetOrAdd(code, LookupAsync(...))` evaluates its argument first, so every miss starts a query even when one is already stored. The factory overload runs the factory outside the dictionary's lock, so two callers that miss at the same moment can both start one. A `Lazy` costs nothing to create, and only the stored one ever has `.Value` read, so a lost race throws away an allocation, not a query. The rule: the value in the dictionary must not start work by existing. A `TaskCompletionSource` with `TryAdd` (only the winner runs the query) follows the same rule without `Lazy`. Mutation: calling the lookup directly without the `Lazy` turned three tests red.
+</details>
+
+<details><summary>Where is a finished lookup removed, and why with <code>TryRemove(KeyValuePair.Create(code, self))</code>? How does the lookup get <code>self</code>?</summary>
+
+In the shared lookup's `finally`, so it happens on success and failure and before any caller sees the result. Left in, a success would answer every later miss with an old entry, and a failure would answer with the same exception until a restart. Removing in the callers after their `await` fails when every caller is cancelled: nobody removes it. The pair removes the entry only if it is still this lookup, so a newer one for the same code is never deleted (that mutation survived; the race sits in a gap no test controls). For `self`, declare `Lazy<...>? lookup = null;` then `lookup = new(() => LookupAsync(code, lookup!));`: a lambda captures the variable, not its value, and reads it only when `.Value` runs. Then store that same object, `GetOrAdd(code, lookup)`. Building a second `new Lazy` inside `GetOrAdd` stores one object and passes the other as `self`, so the pair never matches and nothing is removed.
+</details>
+
+<details><summary>JavaScript runs on one thread. How can a lazily created singleton (<code>if (!cache) cache = await createCache()</code>) still end up with two instances, and what is the fix?</summary>
+
+`await` pauses only the function that awaits. While `createCache()` runs, the event loop runs other queued work, such as another request that calls the getter, sees `cache` still undefined (it is assigned after the `await`), and starts a second one. One thread means no two lines run at the same instant, but code interleaves at every `await`. The fix caches the promise with no `await` between the check and the assignment: `return (cachePromise ??= createCache())`. Clear it on rejection, or one failed start fails every later call. C# interleaves the same way at each `await`, and also runs threads in parallel, which is why it needs `ConcurrentDictionary` and `Lazy` on top.
+</details>

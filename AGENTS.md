@@ -34,14 +34,14 @@ All code stays in the single namespace `Shortener`.
 - `Caching/`:
   - `CacheOptions`.
   - `RedisConnection`: the connection settings that keep a Redis outage cheap.
-  - `CachedUrlStore`: a cache-aside decorator around the real `IUrlStore`, registered only when `ConnectionStrings:Redis` is set. It counts reads as hit, miss or error.
+  - `CachedUrlStore`: a cache-aside decorator around the real `IUrlStore`, registered only when `ConnectionStrings:Redis` is set. It counts reads as hit, miss or error. Concurrent misses for one code share one lookup (single-flight): the inner read and the Redis write run once, without any caller's token, and each caller waits with its own.
 
 ### `tests/Shortener.Tests/`
 Namespace `Shortener.Tests`. The test project has no `Program.cs` of its own. `WebApplicationFactory<Program>` reaches the app through the project reference.
 - Store behavior lives in abstract contract classes (`UrlStoreContractTests`, `ExpirySweeperContractTests`, `ClickStoreContractTests`), each with an in-memory and a Postgres subclass.
 - The Postgres tests need Docker running (Testcontainers, one shared container via `[Collection("postgres")]`).
 - The Redis tests need Docker too (`[Collection("redis")]`, `RedisFixture`). They never flush Redis; each store or app gets its own key prefix from `RedisFixture.UniquePrefix()`. A multiplexer on `localhost:1` (built with `RedisConnection.Configure`) stands in for a Redis that is down.
-- `GatedUrlStore` holds every `GetAsync` until `Release` and records `MaxInFlight`; `WaitForArrivalsAsync(n)` waits until n calls are held. Never released, it is a stalled database (held calls still end on cancellation).
+- `GatedUrlStore` holds every `GetAsync` until `Release` and records `MaxInFlight`; `WaitForArrivalsAsync(n)` waits until n calls are held. `Fail(ex)` fails held and later calls instead. The gate opens once, for good. Never released, it is a stalled database (held calls still end on cancellation).
 - With warm-up on, a test that expects `/health/ready` to be 200 waits for `WarmUpService.Ready` first; tests that count store reads or cache counters set `WarmUp:Calls` to 0.
 - `FlakyUrlStore(n)` fails the first n lookups with `StorageUnavailableException`; with `int.MaxValue` it is a database that stays down.
 - `CountingUrlStore` counts reads of the inner store and records their codes (`Codes`). `TestMeters.CreateFactory()` with a `MetricCollector` reads a counter for one store.
