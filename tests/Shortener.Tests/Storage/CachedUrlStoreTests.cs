@@ -333,7 +333,10 @@ public class CachedUrlStoreTests(RedisFixture redis)
             await Task.Delay(200);
 
             sourceOne.Cancel();
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => taskOne);
+            // the timeout makes a caller that ignores its token fail here instead of hanging
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                taskOne.WaitAsync(TimeSpan.FromSeconds(5))
+            );
 
             Assert.Equal(1, gated.InFlight);
             gated.Release();

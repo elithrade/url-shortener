@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
@@ -20,6 +21,7 @@ public sealed partial class CachedUrlStore(
     public const string ReadsCounterName = "shortener.cache.reads";
 
     private readonly IDatabase _redis = redis.GetDatabase();
+    private ConcurrentDictionary<string, Lazy<Task<LinkEntry?>>> _runningLookups = new();
 
     // one counter, split by the "result" tag (hit, miss or error); the hit rate is
     // hit / (hit + miss)
@@ -85,28 +87,47 @@ public sealed partial class CachedUrlStore(
             return cachedEntry;
         }
 
-        LinkEntry? entry = await inner.GetAsync(code, ct);
-        if (entry is not null)
+        Lazy<Task<LinkEntry?>>? lookup = null;
+        lookup = new(() => LookupAsync(code, lookup!));
+
+        var runningLookup = _runningLookups.GetOrAdd(code, lookup);
+
+        return await runningLookup.Value.WaitAsync(ct);
+    }
+
+    private async Task<LinkEntry?> LookupAsync(string code, Lazy<Task<LinkEntry?>> self)
+    {
+        try
         {
-            var expireAt = entry.ExpiresAt;
-            var ttl = TimeSpan.FromSeconds(options.Value.TtlSeconds);
-            if (expireAt is not null)
+            LinkEntry? entry = await inner.GetAsync(code, CancellationToken.None);
+            if (entry is not null)
             {
-                var remaining = expireAt - now;
-                ttl = Min(ttl, remaining.Value);
+                var expireAt = entry.ExpiresAt;
+                var ttl = TimeSpan.FromSeconds(options.Value.TtlSeconds);
+                if (expireAt is not null)
+                {
+                    var remaining = expireAt - clock.GetUtcNow();
+                    ttl = Min(ttl, remaining.Value);
+                }
+
+                try
+                {
+                    await _redis.StringSetAsync(Key(code), JsonSerializer.Serialize(entry), ttl);
+                }
+                catch (Exception ex) when (ex is RedisException or RedisTimeoutException)
+                {
+                    CachedUrlStoreLog.RedisUnreachableWarning(logger, ex, "write");
+                }
             }
 
-            try
-            {
-                await _redis.StringSetAsync(Key(code), JsonSerializer.Serialize(entry), ttl);
-            }
-            catch (Exception ex) when (ex is RedisException or RedisTimeoutException)
-            {
-                CachedUrlStoreLog.RedisUnreachableWarning(logger, ex, "write");
-            }
+            return entry;
         }
-
-        return entry;
+        finally
+        {
+            // only if the entry is still this lookup: removing by key alone could delete a newer
+            // lookup for the same code that started after this one finished
+            _runningLookups.TryRemove(KeyValuePair.Create(code, self));
+        }
     }
 
     public ValueTask<bool> TryAddAsync(string code, LinkEntry linkEntry, CancellationToken ct) =>
