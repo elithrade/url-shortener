@@ -1,0 +1,29 @@
+name: Sync lessons to the homepage
+
+# When LESSONS.md changes on main, the homepage's reusable workflow exports the
+# cards and opens (or updates) a pull request on elithrade/elithrade-homepage
+# with content/lessons/url-shortener.json. It runs in this repository, so it
+# needs the HOMEPAGE_SYNC_TOKEN secret: a fine-grained personal access token
+# for elithrade/elithrade-homepage only, with read and write access to
+# Contents and Pull requests. Run it by hand from the Actions tab to resync.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - LESSONS.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    uses: elithrade/elithrade-homepage/.github/workflows/sync-lessons.yml@main
+    with:
+      project-id: url-shortener
+      name: url-shortener
+      description: A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10), to learn system design.
+    secrets:
+      token: ${{ secrets.HOMEPAGE_SYNC_TOKEN }}
