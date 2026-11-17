@@ -5,6 +5,12 @@ Instructions for AI coding agents working in this repository.
 ## Project
 A URL shortener built from scratch with ASP.NET Core Minimal APIs (.NET 10). It is a **learning project** for system design, and the owner wants to write the core logic personally. See `README.md` for the API, `PLAN.md` for the roadmap and current milestone, and `LESSONS.md` for the owner's self-test flashcards. When a session produces a new lesson (a bug found, a trap hit), offer to add a Q&A card to `LESSONS.md` in the same format.
 
+`LESSONS.md` is published to the owner's homepage: on a push to `main`, `.github/workflows/lessons.yml` exports it and opens a pull request there. The exporter rejects anything outside its format, with the line number:
+- Sections are `## <n>. <title>`. Optional intro paragraphs go above a section's first card; nothing may follow its last card.
+- A card is `<details><summary>question</summary>` on one line (`<code>` allowed in the question), the answer paragraphs, then `</details>`.
+- Answers use paragraphs, `code` and **bold** only: no lists, quotes, tables, code blocks or links.
+- A card's id comes from its question, so two questions must not reduce to the same words.
+
 ## Layout
 ```
 Shortener.slnx
