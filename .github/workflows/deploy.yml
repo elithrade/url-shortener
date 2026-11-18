@@ -81,8 +81,10 @@ jobs:
             echo "postgres: $state"
             case "$state" in
               Ready) echo "ready=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
-              Stopped) echo "ready=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
-              *) sleep 15 ;; # Starting, Stopping, Updating: wait for it to settle
+              Starting | Stopping | Updating | Provisioning | Restarting) sleep 15 ;; # settling
+              # Stopped, and states that won't settle soon (Dropping after a failed create,
+              # Disabled, anything new): treat as off, so the push still deploys the image
+              *) echo "ready=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
             esac
           done
           echo "postgres: no settled state after 10 minutes"
@@ -90,7 +92,7 @@ jobs:
 
       - name: Postgres is off
         if: steps.postgres.outputs.ready != 'true'
-        run: echo "::notice::Postgres is off, so this deploy skips the migration and the smoke test. Run start-postgres.yml before using the app."
+        run: echo "::notice::Postgres is not running (see Check Postgres), so this deploy skips the migration and the smoke test. Run start-postgres.yml before using the app."
 
       # the schema first: the new code must never meet an old schema. A failure stops here,
       # and the current revision keeps serving.

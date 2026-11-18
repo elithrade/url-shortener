@@ -66,7 +66,13 @@ jobs:
             case "$state" in
               Ready) exit 0 ;;
               Stopped) az postgres flexible-server start -g "$RG" -n "$SERVER" -o none ;;
-              *) sleep 15 ;; # Starting, Stopping, Updating: wait for it to settle
+              Starting | Stopping | Updating | Provisioning | Restarting) sleep 15 ;; # settling
+              Dropping)
+                echo "::error::Postgres is being deleted (for example after a failed create). Run this again once it is gone."
+                exit 1 ;;
+              *)
+                echo "::error::Postgres is $state, which this workflow can't start. Check it in the portal."
+                exit 1 ;;
             esac
           done
           echo "postgres: not ready after 10 minutes"
