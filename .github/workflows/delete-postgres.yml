@@ -1,6 +1,6 @@
 # Delete the Postgres server, data and all, to stop paying for its storage during a long break.
-# Nothing else changes: the next deploy (deploy.yml) sees the server is missing, recreates it from
-# main.bicep with the same name and password, and migrates the empty database.
+# Nothing else changes, and deploy.yml leaves the server deleted: start-postgres.yml recreates it
+# from main.bicep with the same name and password and migrates the empty database.
 name: delete postgres
 
 on:
