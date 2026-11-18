@@ -12,6 +12,11 @@ public sealed class CacheOptions
     [Range(1, int.MaxValue)]
     public int TtlSeconds { get; init; }
 
+    // shortens each key's TtlSeconds by a random 0 to this many percent, so keys filled together
+    // don't all expire together; 0 turns it off, and at most 50 keeps every TTL at least half
+    [Range(0, 50)]
+    public int TtlJitterPercent { get; init; }
+
     // how long a Redis call may take before it counts as an error (and a miss); the client's
     // default is 5 s, far too long to add to a redirect
     [Range(1, 5000)]
