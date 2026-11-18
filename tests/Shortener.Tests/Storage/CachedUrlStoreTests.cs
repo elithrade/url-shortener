@@ -185,25 +185,27 @@ public class CachedUrlStoreTests(RedisFixture redis)
         Assert.InRange(spread, TimeSpan.FromSeconds(60), TimeSpan.MaxValue);
     }
 
-    // A link that expires in 30 min, with jitter on: the TTL is at most 30 min, so jitter never
+    // Links that expire in 30 min, with jitter on: each TTL is at most 30 min, so jitter never
     // lets a cached entry outlive its link. (The fake clock doesn't move, so 30 min is exact.)
+    // The lower bound catches jitter applied after the min, which cuts 0 to 6 min. One link
+    // missed that 1 run in 6 (a cut under 1 min); with 20, all would need one, about (1/6)^20.
     [Fact]
     public async Task A_jittered_ttl_never_outlives_the_link()
     {
         var (cachedStore, innerStore, clock, prefix) = Create(ttlJitterPercent: 10);
 
-        await innerStore.TryAddAsync(
-            "abc",
-            new LinkEntry("https://example.com/1", clock.GetUtcNow() + TimeSpan.FromMinutes(30)),
-            CancellationToken.None
+        var ttls = await FillAndReadTtlsAsync(
+            cachedStore,
+            innerStore,
+            prefix,
+            20,
+            expiresAt: clock.GetUtcNow() + TimeSpan.FromMinutes(30)
         );
 
-        await cachedStore.GetAsync("abc", CancellationToken.None);
-
-        var ttl = await redis.Redis.GetDatabase().KeyTimeToLiveAsync(prefix + "abc");
-
-        Assert.NotNull(ttl);
-        Assert.InRange(ttl.Value, TimeSpan.FromMinutes(29), TimeSpan.FromMinutes(30));
+        Assert.All(
+            ttls,
+            ttl => Assert.InRange(ttl, TimeSpan.FromMinutes(29), TimeSpan.FromMinutes(30))
+        );
     }
 
     // "Not found" is not cached: a code created later must work on its first read.
@@ -516,20 +518,22 @@ public class CachedUrlStoreTests(RedisFixture redis)
         return (store, inner, clock, prefix);
     }
 
-    // Seeds `count` links that never expire, reads each through the cache (a miss, so the cache
-    // fills the key with its TTL) and returns every key's TTL as Redis reports it.
+    // Seeds `count` links (that never expire, unless given expiresAt), reads each through the
+    // cache (a miss, so the cache fills the key with its TTL) and returns every key's TTL as
+    // Redis reports it.
     private async Task<List<TimeSpan>> FillAndReadTtlsAsync(
         CachedUrlStore cachedStore,
         CountingUrlStore innerStore,
         string prefix,
-        int count
+        int count,
+        DateTimeOffset? expiresAt = null
     )
     {
         for (var i = 0; i < count; i++)
         {
             await innerStore.TryAddAsync(
                 "code" + i,
-                new LinkEntry($"https://example.com/{i}", null),
+                new LinkEntry($"https://example.com/{i}", expiresAt),
                 CancellationToken.None
             );
         }
