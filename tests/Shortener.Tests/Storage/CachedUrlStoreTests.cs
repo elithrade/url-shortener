@@ -152,6 +152,62 @@ public class CachedUrlStoreTests(RedisFixture redis)
         );
     }
 
+    // Jittered TTLs: keys filled together must not all expire together. Each test turns jitter on
+    // with Create(ttlJitterPercent: 10), so a key's TTL is 3600 s shortened by 0 to 10%.
+
+    // Seed and read 50 codes that never expire, then read each key's TTL: every one is within
+    // [3240 s, 3600 s]. Passes without jitter too (3600 is in range); the spread test is the red one.
+    [Fact]
+    public async Task A_jittered_ttl_stays_between_the_lower_bound_and_the_cache_ttl()
+    {
+        var (cachedStore, innerStore, _, prefix) = Create(ttlJitterPercent: 10);
+
+        var ttls = await FillAndReadTtlsAsync(cachedStore, innerStore, prefix, 50);
+
+        // 5 s slack: time passes between the SET and this read
+        Assert.All(
+            ttls,
+            ttl => Assert.InRange(ttl, TimeSpan.FromSeconds(3240 - 5), TimeSpan.FromSeconds(3600))
+        );
+    }
+
+    // Same 50 keys: the largest TTL minus the smallest is over 60 s. Not "not all equal": Redis
+    // reports milliseconds and time passes between SETs, so TTLs differ even without jitter.
+    [Fact]
+    public async Task Jittered_ttls_of_keys_filled_together_spread_out()
+    {
+        var (cachedStore, innerStore, _, prefix) = Create(ttlJitterPercent: 10);
+
+        var ttls = await FillAndReadTtlsAsync(cachedStore, innerStore, prefix, 50);
+        var spread = ttls.Max() - ttls.Min();
+
+        Assert.True(spread > TimeSpan.FromSeconds(60), $"Spread was {spread}");
+        Assert.InRange(spread, TimeSpan.FromSeconds(60), TimeSpan.MaxValue);
+    }
+
+    // Links that expire in 30 min, with jitter on: each TTL is at most 30 min, so jitter never
+    // lets a cached entry outlive its link. (The fake clock doesn't move, so 30 min is exact.)
+    // The lower bound catches jitter applied after the min, which cuts 0 to 6 min. One link
+    // missed that 1 run in 6 (a cut under 1 min); with 20, all would need one, about (1/6)^20.
+    [Fact]
+    public async Task A_jittered_ttl_never_outlives_the_link()
+    {
+        var (cachedStore, innerStore, clock, prefix) = Create(ttlJitterPercent: 10);
+
+        var ttls = await FillAndReadTtlsAsync(
+            cachedStore,
+            innerStore,
+            prefix,
+            20,
+            expiresAt: clock.GetUtcNow() + TimeSpan.FromMinutes(30)
+        );
+
+        Assert.All(
+            ttls,
+            ttl => Assert.InRange(ttl, TimeSpan.FromMinutes(29), TimeSpan.FromMinutes(30))
+        );
+    }
+
     // "Not found" is not cached: a code created later must work on its first read.
     [Fact]
     public async Task A_miss_on_an_unknown_code_caches_nothing()
@@ -420,12 +476,17 @@ public class CachedUrlStoreTests(RedisFixture redis)
     // a cached store around an in-memory store, with its own key prefix; pass a multiplexer to
     // replace the shared container's (for the Redis-down test), or an innerStore to use in place of
     // the in-memory one (a GatedUrlStore for single-flight). Inner counts its reads (Gets).
+    // Jitter is off unless a test turns it on, so the other TTL tests stay exact.
     private (
         CachedUrlStore Store,
         CountingUrlStore Inner,
         FakeTimeProvider Clock,
         string Prefix
-    ) Create(IConnectionMultiplexer? multiplexer = null, IUrlStore? innerStore = null)
+    ) Create(
+        IConnectionMultiplexer? multiplexer = null,
+        IUrlStore? innerStore = null,
+        int ttlJitterPercent = 0
+    )
     {
         var clock = new FakeTimeProvider(Now);
         var inner = new CountingUrlStore(innerStore ?? new InMemoryUrlStore(clock));
@@ -445,6 +506,7 @@ public class CachedUrlStoreTests(RedisFixture redis)
                 new CacheOptions
                 {
                     TtlSeconds = 3600,
+                    TtlJitterPercent = ttlJitterPercent,
                     TimeoutMilliseconds = 1000,
                     KeyPrefix = prefix,
                 }
@@ -454,5 +516,41 @@ public class CachedUrlStoreTests(RedisFixture redis)
         );
 
         return (store, inner, clock, prefix);
+    }
+
+    // Seeds `count` links (that never expire, unless given expiresAt), reads each through the
+    // cache (a miss, so the cache fills the key with its TTL) and returns every key's TTL as
+    // Redis reports it.
+    private async Task<List<TimeSpan>> FillAndReadTtlsAsync(
+        CachedUrlStore cachedStore,
+        CountingUrlStore innerStore,
+        string prefix,
+        int count,
+        DateTimeOffset? expiresAt = null
+    )
+    {
+        for (var i = 0; i < count; i++)
+        {
+            await innerStore.TryAddAsync(
+                "code" + i,
+                new LinkEntry($"https://example.com/{i}", expiresAt),
+                CancellationToken.None
+            );
+        }
+
+        for (var i = 0; i < count; i++)
+        {
+            await cachedStore.GetAsync("code" + i, CancellationToken.None);
+        }
+
+        var ttls = new List<TimeSpan>();
+        for (var i = 0; i < count; i++)
+        {
+            var ttl = await redis.Redis.GetDatabase().KeyTimeToLiveAsync(prefix + "code" + i);
+            Assert.NotNull(ttl); // the key exists and has an expiry
+            ttls.Add(ttl.Value);
+        }
+
+        return ttls;
     }
 }

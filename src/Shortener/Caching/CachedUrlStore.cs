@@ -103,7 +103,13 @@ public sealed partial class CachedUrlStore(
             if (entry is not null)
             {
                 var expireAt = entry.ExpiresAt;
-                var ttl = TimeSpan.FromSeconds(options.Value.TtlSeconds);
+                var ttlJitterPercent = options.Value.TtlJitterPercent;
+                var random = Random.Shared.NextDouble();
+                var cut = TimeSpan.FromSeconds(
+                    ttlJitterPercent / 100d * random * options.Value.TtlSeconds
+                );
+
+                var ttl = TimeSpan.FromSeconds(options.Value.TtlSeconds) - cut;
                 if (expireAt is not null)
                 {
                     var remaining = expireAt - clock.GetUtcNow();

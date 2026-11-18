@@ -38,7 +38,7 @@ All code stays in the single namespace `Shortener`.
   - `ClickFlushService`: the consumer. It sums clicks by (code, day), flushes on a tick or at `MaxBatchSize`, adds failed batches to `Dropped`, and drains on stop.
 - `WarmUp/`: `WarmUpOptions` (`WarmUp` section: `Calls`, 0 turns it off; `Parallelism`; `DeadlineSeconds`) and `WarmUpService`. The service looks up `WarmUpService.Code` (a code no link can have) `Calls` times, retries a failed lookup after a pause, and completes `Ready` when the calls finish or the deadline passes. It is registered as a singleton, and the host runs that same instance, so `WarmUpHealthCheck` (tagged `ready`) reads its `Ready`. `/health/ready` is 503 until warm-up ends.
 - `Caching/`:
-  - `CacheOptions`.
+  - `CacheOptions`: `TtlSeconds`, `TtlJitterPercent` (each key's TTL is cut by a random 0 to that share, so keys filled together expire apart), `TimeoutMilliseconds`, `KeyPrefix`.
   - `RedisConnection`: the connection settings that keep a Redis outage cheap.
   - `CachedUrlStore`: a cache-aside decorator around the real `IUrlStore`, registered only when `ConnectionStrings:Redis` is set. It counts reads as hit, miss or error. Concurrent misses for one code share one lookup (single-flight): the inner read and the Redis write run once, without any caller's token, and each caller waits with its own.
 

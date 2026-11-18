@@ -598,7 +598,12 @@ Milestone 8 is done; items A, B and D are built and measured (see "Already done"
      - Mutations that turn a test red: the creator's token on the shared lookup, a constant key, no removal, no `Lazy` (every caller queries). Survives: `TryRemove(code)` instead of the pair (the race is in an untestable gap; accepted). Callers waiting without `WaitAsync(ct)` hung test 3 until caller A got a 5 s `WaitAsync`; now it fails in 5 s
      - A comment on the `TryRemove` line says why it takes the pair. Merged in PR #9 (Nov 16)
      - Tests first: 100 concurrent reads of one code with a held inner store reach it once; a failure reaches every waiter and the next call queries again; one cancelled caller does not cancel the others; different codes do not wait for each other; nothing is left in flight afterwards
-   - Jittered TTLs: keys filled in the same second expire in the same second an hour later
+   - ✅ Jittered TTLs (Nov 18): keys filled in the same second expired in the same second an hour later
+     - `Cache:TtlJitterPercent` (0 to 50, default 10) cuts each key's `TtlSeconds` by a random 0 to that share, downward only, so `TtlSeconds` stays the maximum. The cut comes before the min with the link's remaining lifetime, so an entry never outlives its link
+     - Tests: 50 keys within [3240 s − 5 s slack, 3600 s]; their spread over 60 s (not "all different": millisecond TTLs differ without jitter); 20 links expiring in 30 min all within [29, 30] min
+     - Mutations that turn a test red: no jitter, jitter only on expiring links, no division by 100, jitter upward, jitter after the min (one near-expiry link missed it 1 run in 6, so the test uses 20)
+     - Found: a TTL of zero or less makes StackExchange.Redis throw `ArgumentOutOfRangeException` before it calls Redis, which is not caught, so the redirect is a 500 (even with Redis down)
+   - The remaining lifetime can be zero or negative if a link expires between the store read and the `SET`, which gives the same 500. Older than jitter; decide whether to skip the `SET` then
 3. **Redis in Azure**, as its own Container App (see "Azure option" under item B).
 
 ## Open items (not scheduled)

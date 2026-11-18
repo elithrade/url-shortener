@@ -1507,3 +1507,15 @@ In the shared lookup's `finally`, so it happens on success and failure and befor
 
 `await` pauses only the function that awaits. While `createCache()` runs, the event loop runs other queued work, such as another request that calls the getter, sees `cache` still undefined (it is assigned after the `await`), and starts a second one. One thread means no two lines run at the same instant, but code interleaves at every `await`. The fix caches the promise with no `await` between the check and the assignment: `return (cachePromise ??= createCache())`. Clear it on rejection, or one failed start fails every later call. C# interleaves the same way at each `await`, and also runs threads in parallel, which is why it needs `ConcurrentDictionary` and `Lazy` on top.
 </details>
+
+## 38. Jittered TTLs
+
+<details><summary>Every cache TTL is shortened by a random 0 to 10%. How do you test randomness, and why did one sample not catch jitter applied in the wrong place?</summary>
+
+Test the outcome over many samples, each assert aimed at one way the code can be wrong. Bounds (50 keys, every TTL in [3240 s, 3600 s]) catch jitter upward or too large, but pass with no jitter at all, because 3600 is in range. Spread (largest minus smallest over 60 s) catches missing jitter. It cannot be "not all equal": Redis reports TTLs in milliseconds and time passes between `SET`s, so TTLs differ without jitter. The lower bound needs a few seconds of slack for the same reason. A near-expiry check with one link (expires in 30 min, TTL in [29, 30] min) caught jitter applied after the min only when the random cut was over a minute: it survived 2 of 6 runs. With 20 links, all 20 cuts would need to be under a minute, about (1/6)^20, and it failed 6 of 6. A test that depends on one random draw catches a bug only some of the time; sample enough that a miss is practically impossible.
+</details>
+
+<details><summary>Why did a TTL bug turn redirects into <code>500</code>s, even with Redis down, when every Redis error is caught?</summary>
+
+A TTL of zero or less makes StackExchange.Redis throw `ArgumentOutOfRangeException` while it builds the `SET`, before it talks to Redis. The cache catches only `RedisException` and `RedisTimeoutException`, so this one escapes and the request fails. An early version forgot to divide the percent by 100, cut up to 36,000 s from 3,600 s, and broke every test that used the app's default 10%. Catching "Redis errors" is not the same as making the cache unable to fail a request: the values passed to the client need their own guarantee. With the percent capped at 50 the cut can't reach zero, but a link that expires between the store read and the `SET` gives a remaining lifetime of zero or less (open in `PLAN.md`).
+</details>
