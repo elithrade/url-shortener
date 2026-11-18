@@ -286,6 +286,7 @@ Deploy steps are in `infra/README.md`; the stage 1 must-dos are under "Azure pla
 - No free offer on this account. Cost analysis: B1MS about AU$0.037 an hour, storage about AU$6.30 a month even while stopped
 - `stop-postgres.yml` stops the server nightly and `deploy.yml` starts it before migrating: about AU$7 to 10 a month instead of about AU$33
 - `delete-postgres.yml` (run by hand) deletes the server for a long break, since storage can't shrink below 32 GB. The next deploy recreates it from the Bicep, then migrates. Verified: a delete, then a deploy that recreated it and returned ready `200`
+- Changed (Nov 18): a push no longer starts or recreates the server, because every push to `main` brought a deleted database back. `main.bicep` has a `deployPostgres` parameter (`DEPLOY_POSTGRES`, off by default) and builds the connection string from the server's host name. With the server off, `deploy.yml` deploys the image and skips the migration and the smoke test. `start-postgres.yml` (by hand) recreates or starts the server, migrates and smoke tests. Migrate and smoke test live in `.github/scripts/`. Not yet verified in Azure: a push with the server off, then a `start-postgres` run from deleted and from stopped
 
 #### ✅ Follow-ups
 - The grace period (see the must-dos)
@@ -590,12 +591,12 @@ Milestone 8 is done; items A, B and D are built and measured (see "Already done"
 2. **Line 2, item E (failure injection).**
    - A stalled Redis, so a test covers the `RedisTimeoutException` catch that survives mutation today
    - Redis killed mid-run: the app falls back to the pool-bound path measured in item D
-   - The cold-cache miss stampede, first (started Nov 15). Plan: single-flight per instance, so concurrent misses for one code share one database lookup (with N instances, up to N lookups per key; a Redis lock was judged not worth its complexity here)
+   - ✅ The cold-cache miss stampede (Nov 15 to 16). Plan: single-flight per instance, so concurrent misses for one code share one database lookup (with N instances, up to N lookups per key; a Redis lock was judged not worth its complexity here)
      - Decided (Nov 15): inside `CachedUrlStore`. The shared unit is `inner.GetAsync` plus the Redis `SET`, so a cold key costs one query and one write, and Postgres is also shielded while Redis is down. It reads its own `now` for the TTL and passes `CancellationToken.None` to the inner store
      - The owner writes it. Traps: `GetOrAdd` can run its factory twice (store a `Lazy<Task>`); the shared lookup must not use one caller's token (each caller waits with `WaitAsync(ct)`); a failed lookup fails all waiters but is removed, so the next call retries; remove with `TryRemove(KeyValuePair)` so a newer lookup is not deleted
      - Built (Nov 16): a `ConcurrentDictionary<string, Lazy<Task<LinkEntry?>>>` of lookups in progress. The `Lazy` captures itself so the lookup's `finally` removes exactly its own pair; each caller waits with `WaitAsync(ct)`. Full suite green (368)
      - Mutations that turn a test red: the creator's token on the shared lookup, a constant key, no removal, no `Lazy` (every caller queries). Survives: `TryRemove(code)` instead of the pair (the race is in an untestable gap; accepted). Callers waiting without `WaitAsync(ct)` hung test 3 until caller A got a 5 s `WaitAsync`; now it fails in 5 s
-     - A comment on the `TryRemove` line says why it takes the pair. Next: open the PR
+     - A comment on the `TryRemove` line says why it takes the pair. Merged in PR #9 (Nov 16)
      - Tests first: 100 concurrent reads of one code with a held inner store reach it once; a failure reaches every waiter and the next call queries again; one cancelled caller does not cancel the others; different codes do not wait for each other; nothing is left in flight afterwards
    - Jittered TTLs: keys filled in the same second expire in the same second an hour later
 3. **Redis in Azure**, as its own Container App (see "Azure option" under item B).

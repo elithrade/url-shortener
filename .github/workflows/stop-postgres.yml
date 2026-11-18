@@ -1,5 +1,5 @@
 # Stop the Postgres server every night: it costs about AU$0.04 an hour while running and only its
-# storage while stopped. deploy.yml starts it again before migrating. Azure restarts a server that
+# storage while stopped. start-postgres.yml starts it again (deploy.yml never does). Azure restarts a server that
 # has been stopped for 7 days, so the nightly run also catches that.
 name: stop postgres
 

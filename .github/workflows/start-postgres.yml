@@ -1,0 +1,81 @@
+# Bring Postgres up to use the app in the cloud: create the server if it was deleted
+# (delete-postgres.yml), start it if it was stopped (stop-postgres.yml), then migrate and smoke test.
+# A push to main never does this (deploy.yml leaves the server alone), so a deleted server costs
+# nothing until this runs. The nightly stop-postgres.yml turns it off again.
+name: start postgres
+
+on:
+  workflow_dispatch: # by hand only
+
+# shares deploy.yml's group, so it never runs in the middle of a deploy
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # OIDC sign-in, same identity as deploy.yml
+
+env:
+  RG: rg-shortener
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7 # the template and the scripts
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Check Postgres
+        id: postgres
+        run: |
+          server=$(az postgres flexible-server list -g "$RG" --query "[0].name" -o tsv)
+          echo "server=$server" >> "$GITHUB_OUTPUT"
+          echo "postgres: ${server:-none}"
+
+      # The template with DEPLOY_POSTGRES=true recreates the server (5 to 10 minutes) with the same
+      # name and password, so the app's connection string still fits. It keeps the image the app
+      # runs now, so only the database changes.
+      - name: Create Postgres
+        if: steps.postgres.outputs.server == ''
+        env:
+          DEPLOY_POSTGRES: 'true'
+          SHORTENER_ALLOWED_IP: ${{ secrets.SHORTENER_ALLOWED_IP }}
+          POSTGRES_ADMIN_PASSWORD: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          # assigned before the export, so a failed lookup stops the step (export would hide it)
+          SHORTENER_IMAGE=$(az containerapp show -n shortener -g "$RG" \
+            --query "properties.template.containers[0].image" -o tsv)
+          export SHORTENER_IMAGE
+          az deployment group create -g "$RG" -n "start-postgres-${{ github.run_number }}" \
+            -f infra/main.bicep -p infra/main.bicepparam -o none
+
+      - name: Start Postgres
+        if: steps.postgres.outputs.server != ''
+        env:
+          SERVER: ${{ steps.postgres.outputs.server }}
+        run: |
+          for _ in $(seq 40); do
+            state=$(az postgres flexible-server show -g "$RG" -n "$SERVER" --query state -o tsv)
+            echo "postgres: $state"
+            case "$state" in
+              Ready) exit 0 ;;
+              Stopped) az postgres flexible-server start -g "$RG" -n "$SERVER" -o none ;;
+              *) sleep 15 ;; # Starting, Stopping, Updating: wait for it to settle
+            esac
+          done
+          echo "postgres: not ready after 10 minutes"
+          exit 1
+
+      # a push made while the server was off deployed its image without migrating; this catches up
+      # (the migrate job already has the app's image, from that deploy)
+      - name: Migrate
+        run: .github/scripts/migrate.sh
+
+      - name: Smoke test
+        run: .github/scripts/smoke-test.sh

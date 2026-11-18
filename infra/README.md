@@ -67,6 +67,7 @@ The first push creates a **private** package. Make it public once (profile → P
 set -a; . <path to the password file>; set +a        # exports POSTGRES_ADMIN_PASSWORD
 export SHORTENER_IMAGE=$IMAGE
 export SHORTENER_ALLOWED_IP=$(curl -s https://api.ipify.org)
+export DEPLOY_POSTGRES=true                          # create or update the server; leave unset to leave it alone
 
 az deployment group what-if -g rg-shortener -f infra/main.bicep -p infra/main.bicepparam
 az deployment group create  -g rg-shortener -n deploy-$(git rev-parse --short HEAD) \
@@ -75,6 +76,7 @@ az deployment group create  -g rg-shortener -n deploy-$(git rev-parse --short HE
 
 - `what-if` lists what would change (`+` create, `~` modify, `-` delete) and changes nothing.
 - `create` is incremental: resources the template doesn't mention are left alone, and re-running it with no changes does nothing. The first run takes about 5 to 10 minutes, mostly for Postgres.
+- Without `DEPLOY_POSTGRES=true` the template skips the Postgres server, database and firewall rule, so a deleted server stays deleted. The app's connection string uses the server's host name either way.
 - Every deployment is recorded under the given `-n` name (portal: resource group → Deployments).
 
 The template's outputs give the app's address:
@@ -150,16 +152,22 @@ Measured in `australiaeast`, on an account with no free offer:
 - 32 GB of storage: about AU$6.30 a month, running or stopped
 - Log Analytics: within its free 5 GB
 
-`.github/workflows/stop-postgres.yml` stops the server every night (14:00 UTC), and `deploy.yml` starts it before migrating, so a push never fails on a stopped database. To use the app between deploys, start the server by hand:
+Postgres runs only when you want it:
+
+- `.github/workflows/start-postgres.yml` (by hand) brings it up: it recreates the server from the template if it was deleted (5 to 10 minutes, same name and password), starts it if it was stopped, then migrates and runs the smoke test.
+- `.github/workflows/stop-postgres.yml` stops it every night (14:00 UTC). A stopped server pays only for storage, and Azure restarts it after 7 days, which the nightly run catches.
+- `deploy.yml` never starts or creates it. With the server running, a push migrates, deploys and smoke tests as usual. With it stopped or deleted, the push deploys the new image and skips the migration and the smoke test (a notice on the run says so), and the next `start-postgres.yml` migrates.
+
+To stop or start it from a terminal instead:
 
 ```bash
 az postgres flexible-server start -g rg-shortener -n <server name>
-az postgres flexible-server stop  -g rg-shortener -n <server name>   # pays only for storage; Azure restarts it after 7 days
+az postgres flexible-server stop  -g rg-shortener -n <server name>
 ```
 
 The server name is in the deployment outputs (`postgresHost`, before the first dot).
 
-Storage can't shrink below 32 GB, so the only way to stop paying for it is to delete the server. For a long break, run `.github/workflows/delete-postgres.yml` by hand (type `delete` to confirm). It removes every stored link. The next deploy finds no server, runs the template first to recreate it with the same name and password, then migrates as usual. That deploy takes about 5 to 10 minutes longer than a normal one. Delete only the server, never the resource group: the deploy identity lives in it.
+Storage can't shrink below 32 GB, so the only way to stop paying for it is to delete the server. For a long break, run `.github/workflows/delete-postgres.yml` by hand (type `delete` to confirm). It removes every stored link, and nothing brings the server back until you run `start-postgres.yml`. Delete only the server, never the resource group: the deploy identity lives in it.
 
 GitHub disables scheduled workflows in a public repo after 60 days without activity. Re-enable the nightly stop from the Actions tab.
 

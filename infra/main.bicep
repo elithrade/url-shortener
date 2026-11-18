@@ -11,6 +11,9 @@ param image string
 @description('The only client address allowed through the ingress until stage 3 (APIM) protects POST /shorten.')
 param allowedClientIp string
 
+@description('Create or update the Postgres server. Off on a push to main, so a deleted server stays deleted; start-postgres.yml turns it on.')
+param deployPostgres bool = false
+
 param postgresAdminLogin string = 'shortener_admin'
 
 @secure()
@@ -20,6 +23,8 @@ param postgresAdminPassword string
 var appName = 'shortener'
 // Postgres server names are global DNS names, so add a suffix that is stable per resource group
 var postgresName = 'shortener-pg-${uniqueString(resourceGroup().id)}'
+// known before the server exists, so the app and the migrate job deploy without it
+var postgresHost = '${postgresName}.postgres.database.azure.com'
 var databaseName = 'shortener'
 
 // ---- logs -------------------------------------------------------------------------------------
@@ -37,7 +42,8 @@ resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
 
 // ---- database ---------------------------------------------------------------------------------
 
-resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
+// deployed only with deployPostgres; a deploy without it leaves an existing server alone (incremental mode)
+resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = if (deployPostgres) {
   name: postgresName
   location: location
   sku: {
@@ -58,7 +64,7 @@ resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
   }
 }
 
-resource database 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-01' = {
+resource database 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-01' = if (deployPostgres) {
   parent: postgres
   name: databaseName
   properties: {
@@ -70,7 +76,7 @@ resource database 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-0
 // 0.0.0.0 means "any Azure service": Container Apps on the consumption plan has no fixed outbound
 // address. Weak (other Azure tenants pass too, the password still guards it); stage 2 replaces this
 // with private access inside a VNet.
-resource allowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = {
+resource allowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = if (deployPostgres) {
   parent: postgres
   name: 'AllowAzureServices'
   properties: {
@@ -96,7 +102,7 @@ resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
 }
 
 // VerifyFull: encrypt and check that the certificate is valid and issued for this host name
-var connectionString = 'Host=${postgres.properties.fullyQualifiedDomainName};Database=${databaseName};Username=${postgresAdminLogin};Password=${postgresAdminPassword};SSL Mode=VerifyFull'
+var connectionString = 'Host=${postgresHost};Database=${databaseName};Username=${postgresAdminLogin};Password=${postgresAdminPassword};SSL Mode=VerifyFull'
 
 // the app and the migrate job share the secret and the storage settings
 var secrets = [
@@ -205,4 +211,4 @@ resource migrate 'Microsoft.App/jobs@2024-03-01' = {
 }
 
 output appUrl string = baseUrl
-output postgresHost string = postgres.properties.fullyQualifiedDomainName
+output postgresHost string = postgresHost

@@ -64,62 +64,44 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # Postgres is stopped when idle to save cost (stop-postgres.yml); the migration needs it running.
-      # If it was deleted (delete-postgres.yml), the next step recreates it.
-      - name: Start Postgres
+      # Postgres runs only when wanted (start-postgres.yml); the nightly stop and delete-postgres.yml
+      # turn it off. A push never starts or creates it: with the server off, the new image is
+      # deployed without the migration and the smoke test, and start-postgres.yml runs both later.
+      - name: Check Postgres
         id: postgres
         run: |
           server=$(az postgres flexible-server list -g "$RG" --query "[0].name" -o tsv)
           if [ -z "$server" ]; then
-            echo "postgres: none, Bicep creates it"
-            echo "missing=true" >> "$GITHUB_OUTPUT"
+            echo "postgres: none"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           for _ in $(seq 40); do
             state=$(az postgres flexible-server show -g "$RG" -n "$server" --query state -o tsv)
             echo "postgres: $state"
             case "$state" in
-              Ready) exit 0 ;;
-              Stopped) az postgres flexible-server start -g "$RG" -n "$server" -o none ;;
+              Ready) echo "ready=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+              Stopped) echo "ready=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
               *) sleep 15 ;; # Starting, Stopping, Updating: wait for it to settle
             esac
           done
-          echo "postgres: not ready after 10 minutes"
+          echo "postgres: no settled state after 10 minutes"
           exit 1
 
-      # Only after delete-postgres.yml: the full template recreates the server (5 to 10 minutes) with
-      # the same name and password, so the app's connection string still fits. The app moves to the
-      # new image before the schema exists, which is fine here: the database is new and empty.
-      - name: Create Postgres
-        if: steps.postgres.outputs.missing == 'true'
-        env:
-          SHORTENER_IMAGE: ${{ env.IMAGE }}
-          SHORTENER_ALLOWED_IP: ${{ secrets.SHORTENER_ALLOWED_IP }}
-          POSTGRES_ADMIN_PASSWORD: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
-        run: |
-          az deployment group create -g "$RG" -n "create-postgres-${{ github.run_number }}" \
-            -f infra/main.bicep -p infra/main.bicepparam -o none
+      - name: Postgres is off
+        if: steps.postgres.outputs.ready != 'true'
+        run: echo "::notice::Postgres is off, so this deploy skips the migration and the smoke test. Run start-postgres.yml before using the app."
 
       # the schema first: the new code must never meet an old schema. A failure stops here,
       # and the current revision keeps serving.
       - name: Migrate
+        if: steps.postgres.outputs.ready == 'true'
         run: |
           az containerapp job update -n shortener-migrate -g "$RG" --image "$IMAGE" -o none
-          execution=$(az containerapp job start -n shortener-migrate -g "$RG" --query name -o tsv)
-          for _ in $(seq 60); do
-            status=$(az containerapp job execution show -n shortener-migrate -g "$RG" \
-              --job-execution-name "$execution" --query properties.status -o tsv)
-            echo "migrate: $status"
-            case "$status" in
-              Succeeded) exit 0 ;;
-              Failed | Stopped | Degraded) exit 1 ;;
-            esac
-            sleep 10
-          done
-          echo "migrate: no result after 10 minutes"
-          exit 1
+          .github/scripts/migrate.sh
 
-      # Bicep stays the source of truth: the same template as the manual deploy, with the new image
+      # Bicep stays the source of truth: the same template as the manual deploy, with the new image.
+      # DEPLOY_POSTGRES is unset, so the template leaves the Postgres server alone.
       - name: Deploy
         env:
           SHORTENER_IMAGE: ${{ env.IMAGE }}
@@ -129,22 +111,8 @@ jobs:
           az deployment group create -g "$RG" -n "deploy-${{ github.run_number }}" \
             -f infra/main.bicep -p infra/main.bicepparam -o none
 
-      # The ingress admits only the owner's IP, so let this runner in for the check and always
-      # take the rule out again. If removal ever fails, the next deploy resets the list from Bicep.
+      # without Postgres, /health/ready fails and the ingress sends the app no traffic, so the
+      # check runs only with the server up
       - name: Smoke test
-        run: |
-          url=$(az deployment group show -g "$RG" -n "deploy-${{ github.run_number }}" \
-            --query properties.outputs.appUrl.value -o tsv)
-          echo "::add-mask::$url"
-          runner_ip=$(curl -s https://api.ipify.org)
-          az containerapp ingress access-restriction set -n shortener -g "$RG" \
-            --rule-name ci-smoke --ip-address "$runner_ip/32" --action Allow -o none
-          # retries cover the cold start from zero replicas and the rule taking effect
-          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 6 \
-            -o /dev/null -w "ready: %{http_code}\n" "$url/health/ready"
-
-      - name: Remove smoke-test access
-        if: always()
-        run: |
-          az containerapp ingress access-restriction remove -n shortener -g "$RG" \
-            --rule-name ci-smoke -o none || true
+        if: steps.postgres.outputs.ready == 'true'
+        run: .github/scripts/smoke-test.sh
