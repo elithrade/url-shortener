@@ -115,14 +115,21 @@ public sealed partial class CachedUrlStore(
                     var remaining = expireAt - clock.GetUtcNow();
                     ttl = Min(ttl, remaining.Value);
                 }
-
-                try
+                // the link expired during the read: nothing to cache, and Redis rejects a TTL <= 0
+                if (ttl > TimeSpan.Zero)
                 {
-                    await _redis.StringSetAsync(Key(code), JsonSerializer.Serialize(entry), ttl);
-                }
-                catch (Exception ex) when (ex is RedisException or RedisTimeoutException)
-                {
-                    CachedUrlStoreLog.RedisUnreachableWarning(logger, ex, "write");
+                    try
+                    {
+                        await _redis.StringSetAsync(
+                            Key(code),
+                            JsonSerializer.Serialize(entry),
+                            ttl
+                        );
+                    }
+                    catch (Exception ex) when (ex is RedisException or RedisTimeoutException)
+                    {
+                        CachedUrlStoreLog.RedisUnreachableWarning(logger, ex, "write");
+                    }
                 }
             }
 

@@ -165,9 +165,8 @@ public class CachedUrlStoreTests(RedisFixture redis)
         var ttls = await FillAndReadTtlsAsync(cachedStore, innerStore, prefix, 50);
 
         // 5 s slack: time passes between the SET and this read
-        Assert.All(
-            ttls,
-            ttl => Assert.InRange(ttl, TimeSpan.FromSeconds(3240 - 5), TimeSpan.FromSeconds(3600))
+        Assert.All(ttls, ttl =>
+            Assert.InRange(ttl, TimeSpan.FromSeconds(3240 - 5), TimeSpan.FromSeconds(3600))
         );
     }
 
@@ -202,10 +201,32 @@ public class CachedUrlStoreTests(RedisFixture redis)
             expiresAt: clock.GetUtcNow() + TimeSpan.FromMinutes(30)
         );
 
-        Assert.All(
-            ttls,
-            ttl => Assert.InRange(ttl, TimeSpan.FromMinutes(29), TimeSpan.FromMinutes(30))
+        Assert.All(ttls, ttl =>
+            Assert.InRange(ttl, TimeSpan.FromMinutes(29), TimeSpan.FromMinutes(30))
         );
+    }
+
+    // A link that expires between the store's read and the cache's TTL calculation gives a
+    // remaining lifetime of zero or less. Redis can't take that TTL (the client throws before
+    // sending), so the cache must skip the SET instead of failing the read.
+    // Create(innerStore: new FixedEntryStore(new LinkEntry(url, Now.AddSeconds(-1)))): the store
+    // hands the cache an entry that is already expired. Read it through the cache: no exception,
+    // and no key in Redis (KeyExistsAsync is false).
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task A_link_that_expires_during_the_read_is_not_cached(int offsetSeconds)
+    {
+        var (cachedStore, _, _, prefix) = Create(
+            innerStore: new FixedEntryStore(
+                new LinkEntry("https://example.com", Now.AddSeconds(offsetSeconds))
+            )
+        );
+
+        var entry = await cachedStore.GetAsync("abc", CancellationToken.None);
+
+        Assert.NotNull(entry);
+        Assert.False(await redis.Redis.GetDatabase().KeyExistsAsync(prefix + "abc"));
     }
 
     // "Not found" is not cached: a code created later must work on its first read.
@@ -325,21 +346,18 @@ public class CachedUrlStoreTests(RedisFixture redis)
         {
             var (store, innerStore, _, _) = Create(innerStore: gated);
 
-            var run = Concurrently.RunAsync(
-                100,
-                async _ =>
+            var run = Concurrently.RunAsync(100, async _ =>
+            {
+                try
                 {
-                    try
-                    {
-                        await store.GetAsync("abc", CancellationToken.None);
-                        return null;
-                    }
-                    catch (Exception ex)
-                    {
-                        return ex;
-                    }
+                    await store.GetAsync("abc", CancellationToken.None);
+                    return null;
                 }
-            );
+                catch (Exception ex)
+                {
+                    return ex;
+                }
+            });
 
             await gated.WaitForArrivalsAsync(1);
             // give other 99 callers to reach the shared wait
