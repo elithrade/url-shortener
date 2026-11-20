@@ -604,7 +604,7 @@ Milestone 8 is done; items A, B and D are built and measured (see "Already done"
      - Tests: 50 keys within [3240 s − 5 s slack, 3600 s]; their spread over 60 s (not "all different": millisecond TTLs differ without jitter); 20 links expiring in 30 min all within [29, 30] min
      - Mutations that turn a test red: no jitter, jitter only on expiring links, no division by 100, jitter upward, jitter after the min (one near-expiry link missed it 1 run in 6, so the test uses 20)
      - Found: a TTL of zero or less makes StackExchange.Redis throw `ArgumentOutOfRangeException` before it calls Redis, which is not caught, so the redirect is a 500 (even with Redis down)
-   - The remaining lifetime can be zero or negative if a link expires between the store read and the `SET`, which gives the same 500. Older than jitter; decide whether to skip the `SET` then
+   - ✅ Remaining lifetime of zero or less (Nov 20): a link that expired between the store's read and the TTL calculation threw `ArgumentOutOfRangeException` (a 500 for every caller sharing the lookup). The cache now skips the `SET` unless the TTL is positive and still returns the entry. Test: `FixedEntryStore` hands it an entry that expired 1 s ago (red before the fix) or exactly now (passed before: Redis rejects a zero TTL and the catch logs it as a Redis failure). `>=` instead of `>` survives; accepted, since it only costs that misleading warning
 3. **Redis in Azure**, as its own Container App (see "Azure option" under item B).
 
 ## Open items (not scheduled)

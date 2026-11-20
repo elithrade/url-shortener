@@ -50,6 +50,7 @@ Namespace `Shortener.Tests`. The test project has no `Program.cs` of its own. `W
 - `GatedUrlStore` holds every `GetAsync` until `Release` and records `MaxInFlight`; `WaitForArrivalsAsync(n)` waits until n calls are held. `Fail(ex)` fails held and later calls instead. The gate opens once, for good. Never released, it is a stalled database (held calls still end on cancellation).
 - With warm-up on, a test that expects `/health/ready` to be 200 waits for `WarmUpService.Ready` first; tests that count store reads or cache counters set `WarmUp:Calls` to 0.
 - `FlakyUrlStore(n)` fails the first n lookups with `StorageUnavailableException`; with `int.MaxValue` it is a database that stays down.
+- `FixedEntryStore(entry)` returns the same entry for every code; with an expired one it is a link that expired during the read.
 - `CountingUrlStore` counts reads of the inner store and records their codes (`Codes`). `TestMeters.CreateFactory()` with a `MetricCollector` reads a counter for one store.
 - `ShortenClientExtensions.PostShortenAsync` posts to `/shorten`, optionally with a forged `Host`, a `peer` (the address connected to the app, set through `RemoteIpStartupFilter`) and an `X-Forwarded-For` header.
 - `Concurrently.RunAsync` (or `RunSyncAsync` for synchronous work) starts N tasks behind one gate and releases them together. Lambdas over a `ValueTask` must be `async i => await ...`.
