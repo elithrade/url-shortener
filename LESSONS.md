@@ -1519,3 +1519,15 @@ Test the outcome over many samples, each assert aimed at one way the code can be
 
 A TTL of zero or less makes StackExchange.Redis throw `ArgumentOutOfRangeException` while it builds the `SET`, before it talks to Redis. The cache catches only `RedisException` and `RedisTimeoutException`, so this one escapes and the request fails. An early version forgot to divide the percent by 100, cut up to 36,000 s from 3,600 s, and broke every test that used the app's default 10%. Catching "Redis errors" is not the same as making the cache unable to fail a request: the values passed to the client need their own guarantee. With the percent capped at 50 the cut can't reach zero, but a link that expires between the store read and the `SET` gave a remaining lifetime of zero or less and the same 500, for every caller sharing that lookup. The fix writes to Redis only when the TTL is positive and still returns the entry.
 </details>
+
+## 39. Failure: a stalled Redis
+
+<details><summary>How is a stalled Redis different from a Redis that is down, and how do you make one in a test?</summary>
+
+Down means nothing listens: the connection is refused at once and the client throws `RedisConnectionException`, a `RedisException`. Stalled means the connection stays open but no reply comes, as in a failover, a long pause or a network partition: the client waits for its timeout and throws `RedisTimeoutException`, which derives from `TimeoutException`, not `RedisException`. A catch that names only `RedisException` handles the outage the tests had (a multiplexer on `localhost:1`) and turns every redirect into a 500 during a stall, which is the more common outage in production. To stall a real Redis in a test, send `CLIENT PAUSE <ms> ALL`: Redis stops answering every client except the one that paused it. StackExchange.Redis refuses it unless that connection has `allowAdmin=true`, and `CLIENT UNPAUSE` ends it early so a shared container doesn't hold up the next test. With the pause in place, removing `RedisTimeoutException` from the read's catch turned the test red.
+</details>
+
+<details><summary>The cache's Redis timeout is 200 ms. How long did a read take during a stall, and what did the write after it do?</summary>
+
+The read threw after about 1 s, not 200 ms: StackExchange.Redis checks async timeouts on a heartbeat of about a second, so a setting below that only means "at the next check". The `SET` that fills the cache after the store read did not time out at all: it waited until the pause ended and then succeeded, with both a 2 s and a 5 s pause. So during a stall a cache miss probably waits for the whole stall, and the write's catch for `RedisTimeoutException` can't be reached this way (that mutation survived). Why the `SET` ignores the timeout, and how long it waits if the stall never ends, is open in `PLAN.md`. A configured timeout is a request, not a guarantee: measure what the client does.
+</details>
