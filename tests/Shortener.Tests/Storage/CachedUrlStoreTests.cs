@@ -86,6 +86,39 @@ public class CachedUrlStoreTests(RedisFixture redis)
         Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"took {stopwatch.Elapsed}");
     }
 
+    // A stalled Redis (connection open, no replies) fails a read with RedisTimeoutException, which
+    // is not a RedisException; the catch must name it, or every redirect is a 500 while Redis
+    // stalls. Connect the store with RedisConnection.Configure(redis.ConnectionString, new
+    // CacheOptions { TimeoutMilliseconds = 200 }), pause it with redis.PauseAsync and read: the
+    // entry comes from the inner store, and the read counts as an error. Covers the read's catch
+    // only: the SET after the store read did not time out but waited for the pause to end (2 s and
+    // 5 s pauses), so the write catch's RedisTimeoutException clause is still untested.
+    [Fact]
+    public async Task A_stalled_redis_read_falls_back_to_the_inner_store()
+    {
+        // the container's real address, so the connection opens; only the replies stop
+        await using var multiplexer = await ConnectionMultiplexer.ConnectAsync(
+            RedisConnection.Configure(
+                redis.ConnectionString,
+                new CacheOptions { TimeoutMilliseconds = 200 }
+            )
+        );
+        var (cachedStore, innerStore, _, _) = Create(multiplexer);
+
+        var entry = new LinkEntry("https://example.com/a", Now.AddMinutes(10));
+        await innerStore.TryAddAsync("abc", entry, CancellationToken.None);
+
+        await using (await redis.PauseAsync(TimeSpan.FromSeconds(2)))
+        {
+            var result = await cachedStore.GetAsync("abc", CancellationToken.None);
+
+            Assert.Equal(entry, result);
+        }
+
+        Assert.Equal(1, Reads("error"));
+        Assert.Equal(1, innerStore.Gets);
+    }
+
     // Bug 3: a cached value the app can't use is a miss, not "not found".
     [Theory]
     [InlineData("null")] // valid JSON that deserializes to null
