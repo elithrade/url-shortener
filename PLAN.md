@@ -591,7 +591,7 @@ Milestone 8 is done; items A, B and D are built and measured (see "Already done"
 1. **Line 2, item C (multi-instance).** Set Npgsql's Max Pool Size so that replicas × pool stays under the server's limit. The pool defaults to 100 connections per connection string; Postgres allows 100 in all and Azure B1ms about 50. Item D showed one instance with the default pool taking all 100. (A test that filled the pool locked a later test out; fixed with `ClearAllPools`.)
 2. **Line 2, item E (failure injection).**
    - ✅ A stalled Redis (Nov 20): `RedisFixture.PauseAsync` sends `CLIENT PAUSE <ms> ALL` over an admin connection (`allowAdmin`; refused without it) and unpauses on dispose. `A_stalled_redis_read_falls_back_to_the_inner_store` reads during a 2 s pause: the read throws `RedisTimeoutException` after about 1 s (the client checks timeouts on a ~1 s heartbeat, not at the 200 ms setting), the entry comes from the store, and the read counts as an error. Removing the timeout from the read's catch turns it red
-     - Open: the cache's `SET` after a stalled read did not time out. It waited until the pause ended (2 s and 5 s pauses), so the write catch's timeout clause is untested, and a stalled Redis probably delays each miss by the whole stall. Find out why the `SET` ignores the 200 ms timeout, and how long it waits when the stall doesn't end
+     - The `SET` that waited out the stall moved to "Open items", under Caching
    - Redis killed mid-run: the app falls back to the pool-bound path measured in item D
    - ✅ The cold-cache miss stampede (Nov 15 to 16). Plan: single-flight per instance, so concurrent misses for one code share one database lookup (with N instances, up to N lookups per key; a Redis lock was judged not worth its complexity here)
      - Decided (Nov 15): inside `CachedUrlStore`. The shared unit is `inner.GetAsync` plus the Redis `SET`, so a cold key costs one query and one write, and Postgres is also shielded while Redis is down. It reads its own `now` for the TTL and passes `CancellationToken.None` to the inner store
@@ -609,6 +609,9 @@ Milestone 8 is done; items A, B and D are built and measured (see "Already done"
 3. **Redis in Azure**, as its own Container App (see "Azure option" under item B).
 
 ## Open items (not scheduled)
+**Caching**
+- The cache's `SET` after a stalled read did not time out: it waited until the pause ended (2 s and 5 s pauses in `A_stalled_redis_read_falls_back_to_the_inner_store`), while the read before it threw `RedisTimeoutException` after about 1 s. So a stalled Redis probably delays each miss by the whole stall, and the write catch's timeout clause is untested (that mutation survives). Find out why the `SET` ignores the 200 ms timeout and how long it waits when the stall doesn't end, before Redis runs in Azure.
+
 **Rate limiting**
 - Rate-limit the missing-address warning (log once, or once a minute).
 - A concurrency test for `TokenBucketLimiter`, and eviction of idle buckets.
