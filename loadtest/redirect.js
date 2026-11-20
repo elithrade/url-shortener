@@ -4,7 +4,8 @@
 //   k6 run -e RATE=500 -e DURATION=60s -e HOT_SHARE=0.8 loadtest/redirect.js
 //
 // Settings (all optional, passed with -e):
-//   BASE_URL   the app, default http://localhost:5154
+//   BASE_URL   the app, default http://localhost:5154; several, comma-separated, share the
+//              redirects in turn (instances of one app on one database: setup posts to the first)
 //   LINKS      links created in setup, default 1000
 //   RATE       redirects per second, held constant, default 100
 //   DURATION   how long to hold that rate, default 30s
@@ -13,9 +14,11 @@
 //
 // The app must allow LINKS posts at once: raise RateLimit__Capacity and RateLimit__TokensPerPeriod.
 import http from 'k6/http';
+import exec from 'k6/execution';
 import { check } from 'k6';
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:5154';
+const BASE_URLS = (__ENV.BASE_URL || 'http://localhost:5154').split(',');
+const BASE_URL = BASE_URLS[0];
 const LINKS = Number(__ENV.LINKS || 1000);
 const RATE = Number(__ENV.RATE || 100);
 const DURATION = __ENV.DURATION || '30s';
@@ -75,6 +78,7 @@ export default function ({ codes }) {
   const hot = Math.max(1, Math.floor(codes.length / 100));
   const pool = Math.random() < HOT_SHARE ? hot : codes.length;
   const code = codes[Math.floor(Math.random() * pool)];
-  const res = http.get(`${BASE_URL}/${code}`, { tags: { name: 'GET /{code}' } });
+  const base = BASE_URLS[(exec.scenario.iterationInTest) % BASE_URLS.length];
+  const res = http.get(`${base}/${code}`, { tags: { name: 'GET /{code}' } });
   check(res, { 'status is 302': (r) => r.status === 302 });
 }
